@@ -96,13 +96,38 @@ pub fn rust_worker_init() -> c_int {
         worker_running = 1;
         worker_request = EMPTY_WORKER_REQUEST;
 
-        if libc::pthread_create(
+        // Create the worker with every signal blocked. A new thread inherits
+        // the creating thread's mask, and a library thread must never be a
+        // candidate for the process's asynchronous signals.
+        //
+        // Plex handles signals on a dedicated thread that sits in sigwait()
+        // with them blocked everywhere else. A thread of ours without that
+        // mask can be handed SIGCHLD instead -- Plex spawns plug-ins, so it
+        // arrives within seconds -- and Plex treats a signal its own thread
+        // never saw as fatal:
+        //
+        //	Received unexpected async signal 17
+        //	****** PLEX MEDIA SERVER CRASHED
+        //
+        // It happens just after the server starts answering requests, which is
+        // a cruel place to lose it.
+        let mut all_signals: libc::sigset_t = std::mem::zeroed();
+        let mut saved: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all_signals);
+        let masked = libc::pthread_sigmask(libc::SIG_SETMASK, &all_signals, &mut saved) == 0;
+
+        let created = libc::pthread_create(
             ptr::addr_of_mut!(worker_thread),
             &attr as *const _,
             worker_thread_func,
             ptr::null_mut(),
-        ) != 0
-        {
+        );
+
+        if masked {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &saved, ptr::null_mut());
+        }
+
+        if created != 0 {
             log_error("WORKER: Failed to create thread");
             worker_running = 0;
             libc::pthread_attr_destroy(&mut attr as *mut _);
