@@ -92,6 +92,16 @@ pub fn record_loader_pid() {
 /// another thread in the parent may already hold -- and Plex spawns its
 /// plug-ins from a thread pool, so one usually does.
 ///
+/// Stack is the harder limit. musl carves the clone child's stack out of the
+/// caller's own frame -- about `1024 + PATH_MAX` bytes -- so anything that
+/// reserves a Rust-sized frame in that child runs off the end of it and into
+/// the parent's live frames. The parent then returns through a clobbered
+/// address: the crash lands with a garbage instruction pointer well outside
+/// every loaded module, which is what made it look like anything but this.
+///
+/// So callers must test this *before* calling anything with a real frame, not
+/// inside it.
+///
 /// Passing the environment through unchanged is the whole of the fix: the
 /// child is about to exec, and the shim has already removed `LD_PRELOAD` from
 /// this process's own environment, so it does not follow the child anyway.
@@ -536,6 +546,12 @@ pub unsafe extern "C" fn execve(
         return -1;
     };
 
+    // Before anything with a frame: this may be a clone(CLONE_VM) child
+    // running on a few KB carved out of the parent's stack.
+    if !should_adjust_child_env() {
+        return orig(path, argv, envp);
+    }
+
     if let Some((label, filtered)) = adjusted_env_for_process(path, argv, envp) {
         maybe_log_adjustment(
             &label,
@@ -591,6 +607,12 @@ pub unsafe extern "C" fn execvpe(
         set_errno(libc::ENOSYS);
         return -1;
     };
+
+    // Before anything with a frame: this may be a clone(CLONE_VM) child
+    // running on a few KB carved out of the parent's stack.
+    if !should_adjust_child_env() {
+        return orig(file, argv, envp);
+    }
 
     if let Some((label, filtered)) = adjusted_env_for_process(file, argv, envp) {
         maybe_log_adjustment(
