@@ -39,7 +39,6 @@ type SyscallFn = unsafe extern "C" fn(
     libc::c_long,
     libc::c_long,
 ) -> libc::c_long;
-type VForkFn = unsafe extern "C" fn() -> libc::pid_t;
 
 static mut ORIG_DAEMON: Option<DaemonFn> = None;
 static mut ORIG_FORK: Option<ForkFn> = None;
@@ -48,7 +47,6 @@ static mut ORIG_PRCTL: Option<PrctlFn> = None;
 static mut ORIG_PTHREAD_SETNAME_NP: Option<PthreadSetnameNpFn> = None;
 static mut ORIG_SETSID: Option<SetsidFn> = None;
 static mut ORIG_SYSCALL: Option<SyscallFn> = None;
-static mut ORIG_VFORK: Option<VForkFn> = None;
 
 static PROCESS_COMPAT_LOG_BUDGET: AtomicI32 = AtomicI32::new(0);
 static SUPPRESS_DAEMON: AtomicI32 = AtomicI32::new(0);
@@ -117,9 +115,6 @@ unsafe fn resolve_syscall() -> Option<SyscallFn> {
     resolve_symbol(&mut ORIG_SYSCALL, b"syscall\0")
 }
 
-unsafe fn resolve_vfork() -> Option<VForkFn> {
-    resolve_symbol(&mut ORIG_VFORK, b"vfork\0")
-}
 
 unsafe fn set_errno(err: c_int) {
     *libc::__errno_location() = err;
@@ -370,23 +365,28 @@ pub unsafe extern "C" fn clone(
     rc
 }
 
-#[no_mangle]
-/// # Safety
-/// ABI interposition wrapper for `vfork`. Callers must obey libc preconditions.
-pub unsafe extern "C" fn vfork() -> libc::pid_t {
-    let Some(orig) = resolve_vfork() else {
-        set_errno(libc::ENOSYS);
-        return -1;
-    };
-
-    let rc = orig();
-    if rc > 0 {
-        maybe_log_event(b"vfork\0", i64::from(rc), 0);
-    } else if rc < 0 {
-        maybe_log_event(b"vfork\0", -1, *libc::__errno_location());
-    }
-    rc
-}
+// `vfork` is deliberately NOT interposed.
+//
+// A vfork child runs on the parent's own stack with the parent's thread
+// suspended, and it must never return from the frame that called vfork. An
+// interposer makes it do exactly that: `orig()` returns in the child as well
+// as the parent, the child then falls through the wrapper's epilogue and
+// returns, and unwinding that frame scribbles over the return address and
+// saved registers the suspended parent is going to resume through.
+//
+// Plex starts its plug-ins this way. The child went on to exec and ran
+// perfectly well; the parent came back to a clobbered stack and died with an
+// instruction pointer outside every loaded module (0x8baa38f6 in one dump).
+// Plex logged nothing after "Plugin: setting environment variable:
+// 'PYTHONPATH=...'", no plug-in ever reported its port, every /:/plugins
+// request answered 503, and the server never finished starting.
+//
+// There is no safe way to write this wrapper -- not with a tail call, not with
+// `#[inline(always)]` -- because the hazard is the frame itself, so the
+// interposer is gone rather than fixed. It only ever logged.
+//
+// The same reasoning applies to any future `clone` wrapping when the flags
+// include CLONE_VFORK: see `should_wrap_clone`.
 
 #[no_mangle]
 /// # Safety
