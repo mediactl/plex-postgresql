@@ -207,3 +207,6 @@ pub extern "C" fn rust_my_sqlite3_bind_parameter_index(
 pub extern "C" fn rust_my_sqlite3_expanded_sql(p_stmt: *mut sqlite3_stmt) -> *mut c_char {
     expanded_sql_impl(p_stmt)
 }
+
+#[cfg(test)]
+mod tests;

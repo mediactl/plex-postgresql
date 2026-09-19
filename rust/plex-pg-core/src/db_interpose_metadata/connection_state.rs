@@ -8,14 +8,20 @@ pub(super) fn changes_impl(db: *mut sqlite3) -> c_int {
     };
 
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
-    let mut result = 0;
     if !pg_conn.is_null() {
         let conn = unsafe { &*pg_conn };
         if conn.is_pg_active != 0 {
-            result = conn.last_changes;
+            return conn.last_changes;
         }
     }
-    result
+    // Not a handle we redirected -- Plex's in-memory statistics database is
+    // opened through the interposer and left on SQLite -- so SQLite has the
+    // answer and returning 0 would be a lie. See the note on
+    // `last_insert_rowid_impl`.
+    match crate::db_interpose_common::get_orig_sqlite3_changes() {
+        Some(f) => unsafe { f(db) },
+        None => 0,
+    }
 }
 
 pub(super) fn changes64_impl(db: *mut sqlite3) -> i64 {
@@ -25,14 +31,16 @@ pub(super) fn changes64_impl(db: *mut sqlite3) -> i64 {
     };
 
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
-    let mut result: i64 = 0;
     if !pg_conn.is_null() {
         let conn = unsafe { &*pg_conn };
         if conn.is_pg_active != 0 {
-            result = conn.last_changes as i64;
+            return conn.last_changes as i64;
         }
     }
-    result
+    match crate::db_interpose_common::get_orig_sqlite3_changes64() {
+        Some(f) => unsafe { f(db) },
+        None => 0,
+    }
 }
 
 pub(super) fn last_insert_rowid_impl(db: *mut sqlite3) -> i64 {
@@ -47,9 +55,28 @@ pub(super) fn last_insert_rowid_impl(db: *mut sqlite3) -> i64 {
 
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
     if pg_conn.is_null() {
+        // No PostgreSQL connection for this handle means the shim never took
+        // it over. Plex opens its in-memory statistics database through the
+        // interposer and it is deliberately left on SQLite (`redirect=0`), so
+        // the row id it wants is SQLite's.
+        //
+        // Answering from the global PostgreSQL row id instead hands Plex an id
+        // out of an unrelated database. Its insert-then-read-the-id loop never
+        // agrees with itself and retries once a second for ever, which is
+        // where startup used to stop: past migrations, serving 503, with this
+        // line in the log once a second.
+        if let Some(f) = crate::db_interpose_common::get_orig_sqlite3_last_insert_rowid() {
+            let rowid = unsafe { f(db) };
+            log_debug_lazy!(
+                "last_insert_rowid: CALLED db={:p} not redirected, SQLite says {}",
+                db,
+                rowid
+            );
+            return rowid;
+        }
         let global_rowid = crate::pg_client::rust_get_global_last_insert_rowid();
         log_debug_lazy!(
-            "last_insert_rowid: CALLED db={:p} pg_conn=NULL (no exact match, global={})",
+            "last_insert_rowid: CALLED db={:p} pg_conn=NULL, no original to ask (global={})",
             db,
             global_rowid
         );
