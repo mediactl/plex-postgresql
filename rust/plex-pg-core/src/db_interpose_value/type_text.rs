@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 use crate::db_interpose_common::{
     CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN, CRASH_LAST_COLUMN_MAX_LEN, CRASH_LAST_COLUMN_SEQ,
 };
@@ -173,6 +174,16 @@ pub(super) fn value_text_impl(p_val: *mut sqlite3_value) -> *const c_uchar {
             suffix
         );
     }
+
+    // Every call, not every hundredth: a value that comes back wrong is read
+    // once, and the sampled line is almost never the one that mattered.
+    log_debug_lazy!(
+        "VALUE_TEXT_TRACE: col={} row={} copied={} buf={}",
+        ctx.col,
+        ctx.row,
+        len,
+        buf
+    );
 
     (unsafe { VALUE_TEXT_BUFFERS[buf].as_ptr() }) as *const c_uchar
 }

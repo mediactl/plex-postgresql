@@ -151,6 +151,14 @@ pub(super) fn value_bytes_impl(p_val: *mut sqlite3_value) -> c_int {
         ctx.row,
         ctx.col,
     );
+    // Paired with VALUE_TEXT_TRACE: this is the length Plex builds its string
+    // from, and the copy above is what it builds it out of. They have to agree.
+    crate::log_debug_lazy!(
+        "VALUE_BYTES_TRACE: col={} row={} len={}",
+        ctx.col,
+        ctx.row,
+        len
+    );
     if len > 0 {
         len
     } else {
