@@ -33,6 +33,13 @@ static mut ORIG_CREATE_SIMPLE_CONVERTER: Option<CreateSimpleConverterFn> = None;
 pub static mut SHIM_CREATE_UTF8_CODECVT_PTR: usize = 0;
 #[no_mangle]
 pub static mut SHIM_CREATE_SIMPLE_CODECVT_PTR: usize = 0;
+/// The converter pair, for the x86-64 hooks below. Boost reaches the failing
+/// charset through `create_simple_converter` on this architecture, where
+/// AArch64 reaches it through `create_simple_codecvt`.
+#[no_mangle]
+pub static mut SHIM_CREATE_UTF8_CONVERTER_PTR: usize = 0;
+#[no_mangle]
+pub static mut SHIM_CREATE_SIMPLE_CONVERTER_PTR: usize = 0;
 
 static FORCE_IGNORE_SIGCHLD: AtomicI32 = AtomicI32::new(1);
 static INTERCEPT_SIGACTION: AtomicI32 = AtomicI32::new(1);
@@ -116,6 +123,24 @@ unsafe fn resolve_interposition_hooks() {
     );
     if !sym.is_null() {
         ptr::write(ptr::addr_of_mut!(SHIM_CREATE_UTF8_CODECVT_PTR), sym as usize);
+    }
+
+    // create_simple_converter — pass-through target for the x86-64 hook.
+    let sym = libc::dlsym(
+        libc::RTLD_NEXT,
+        b"_ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE\0".as_ptr() as *const c_char
+    );
+    if !sym.is_null() {
+        ptr::write(ptr::addr_of_mut!(SHIM_CREATE_SIMPLE_CONVERTER_PTR), sym as usize);
+    }
+
+    // create_utf8_converter — ASCII redirect target for the x86-64 hook.
+    let sym = libc::dlsym(
+        libc::RTLD_NEXT,
+        b"_ZN5boost6locale4util21create_utf8_converterEv\0".as_ptr() as *const c_char
+    );
+    if !sym.is_null() {
+        ptr::write(ptr::addr_of_mut!(SHIM_CREATE_UTF8_CONVERTER_PTR), sym as usize);
     }
 }
 
@@ -541,6 +566,108 @@ static FINI: extern "C" fn() = shim_cleanup_wrapper;
 //     (x0=locale, x1=facet, x8 restored from stack).
 //   - Falls through to the original create_simple_codecvt otherwise.
 // ────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// x86-64 assembly hooks for boost::locale::util's ASCII charset requests.
+//
+// Plex asks Boost for the "ASCII" charset, and Boost's simple backend is the
+// one thing that will not provide it:
+//
+//	boost::locale::conv::invalid_charset_error:
+//	  Invalid or unsupported charset:Invalid simple encoding ASCII
+//
+// Plex aborts there while loading its translations and never finishes
+// starting. AArch64 already redirects ASCII to UTF-8 (below); this is the
+// same redirect for x86-64, where the request arrives through
+// create_simple_converter rather than create_simple_codecvt.
+//
+// Why assembly, again? Both functions return a class type -- a
+// std::unique_ptr and a std::locale -- so the SysV ABI hands them a hidden
+// result pointer in RDI and shifts every real argument one register along. A
+// wrapper written in Rust would have to name that pointer to forward it, and
+// getting it wrong is how the old create_simple_converter wrapper silently
+// passed its own return slot to Boost as the encoding name.
+//
+//   create_simple_converter: RDI=sret, RSI=const std::string&
+//   create_utf8_converter:   RDI=sret
+//   create_simple_codecvt:   RDI=sret, RSI=locale, RDX=string, RCX=facet
+//   create_utf8_codecvt:     RDI=sret, RSI=locale, RDX=facet
+//
+// The encoding is read straight out of the string object, which holds short
+// strings inline from offset 0; "ASCII" is five bytes, so it is always short.
+// A heap string starts with a pointer there instead and will not match, which
+// is the safe way to be wrong.
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(all(feature = "interpose", target_arch = "x86_64"))]
+std::arch::global_asm!(
+    ".global _ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE",
+    ".type   _ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE, @function",
+    "_ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE:",
+    "cmpb $65, 0(%rsi)",
+    "jne  2f",
+    "cmpb $83, 1(%rsi)",
+    "jne  2f",
+    "cmpb $67, 2(%rsi)",
+    "jne  2f",
+    "cmpb $73, 3(%rsi)",
+    "jne  2f",
+    "cmpb $73, 4(%rsi)",
+    "jne  2f",
+    "cmpb $0,  5(%rsi)",
+    "jne  2f",
+    // ASCII: tail-call create_utf8_converter(sret). RDI is already the sret
+    // pointer and the callee takes nothing else.
+    "movq SHIM_CREATE_UTF8_CONVERTER_PTR@GOTPCREL(%rip), %rax",
+    "movq (%rax), %rax",
+    "testq %rax, %rax",
+    "jz   2f",
+    "jmp  *%rax",
+    "2:",
+    "movq SHIM_CREATE_SIMPLE_CONVERTER_PTR@GOTPCREL(%rip), %rax",
+    "movq (%rax), %rax",
+    "testq %rax, %rax",
+    "jz   3f",
+    "jmp  *%rax",
+    // Nothing resolved: hand back the caller's own result slot rather than
+    // leaving RAX undefined. The caller destroys an empty unique_ptr.
+    "3:",
+    "movq %rdi, %rax",
+    "ret",
+
+    ".global _ZN5boost6locale4util21create_simple_codecvtERKNSt3__26localeERKNS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS0_12char_facet_tE",
+    ".type   _ZN5boost6locale4util21create_simple_codecvtERKNSt3__26localeERKNS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS0_12char_facet_tE, @function",
+    "_ZN5boost6locale4util21create_simple_codecvtERKNSt3__26localeERKNS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS0_12char_facet_tE:",
+    "cmpb $65, 0(%rdx)",
+    "jne  5f",
+    "cmpb $83, 1(%rdx)",
+    "jne  5f",
+    "cmpb $67, 2(%rdx)",
+    "jne  5f",
+    "cmpb $73, 3(%rdx)",
+    "jne  5f",
+    "cmpb $73, 4(%rdx)",
+    "jne  5f",
+    "cmpb $0,  5(%rdx)",
+    "jne  5f",
+    "movq SHIM_CREATE_UTF8_CODECVT_PTR@GOTPCREL(%rip), %rax",
+    "movq (%rax), %rax",
+    "testq %rax, %rax",
+    "jz   5f",
+    // create_utf8_codecvt(sret, locale, facet): the facet moves down a
+    // register now that the encoding is gone.
+    "movq %rcx, %rdx",
+    "jmp  *%rax",
+    "5:",
+    "movq SHIM_CREATE_SIMPLE_CODECVT_PTR@GOTPCREL(%rip), %rax",
+    "movq (%rax), %rax",
+    "testq %rax, %rax",
+    "jz   6f",
+    "jmp  *%rax",
+    "6:",
+    "movq %rdi, %rax",
+    "ret",
+    options(att_syntax),
+);
+
 #[cfg(all(feature = "interpose", target_arch = "aarch64"))]
 std::arch::global_asm!(
     // Export the symbol so LD_PRELOAD interposition takes effect.
