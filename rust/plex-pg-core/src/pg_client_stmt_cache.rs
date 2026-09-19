@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
@@ -167,6 +168,32 @@ pub(crate) fn clear_all_stmt_caches() {
     }
 }
 
+thread_local! {
+    /// Return buffer for `rust_stmt_cache_lookup`.
+    ///
+    /// The cache lives behind a mutex that the lookup releases before it
+    /// returns, so a pointer borrowed from a cache entry is stable only for as
+    /// long as nobody touches that connection's cache. Callers hold the name
+    /// across PQprepare and PQexecPrepared, and a pooled connection can be
+    /// re-prepared, cleared or dropped by another thread in that window.
+    /// Copying into thread-local storage keeps the `const char *` ABI while
+    /// giving callers a lifetime they can actually rely on: the name stays
+    /// valid until this thread's next lookup.
+    static LOOKUP_NAME_BUF: Cell<[c_char; STMT_NAME_LEN]> =
+        const { Cell::new([0; STMT_NAME_LEN]) };
+}
+
+/// Copy `name` into this thread's lookup buffer and return a pointer to it.
+/// Returns null if thread-local storage is already torn down.
+fn stash_lookup_name(name: &[c_char; STMT_NAME_LEN]) -> *const c_char {
+    LOOKUP_NAME_BUF
+        .try_with(|buf| {
+            buf.set(*name);
+            buf.as_ptr() as *const c_char
+        })
+        .unwrap_or(std::ptr::null())
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -232,20 +259,29 @@ pub fn rust_stmt_cache_lookup(
         return 0;
     }
 
-    let mut caches = stmt_caches().lock().unwrap();
-    let cache = match caches.get_mut(&(conn as usize)) {
-        Some(c) => c,
-        None => return 0,
+    let name = {
+        let mut caches = stmt_caches().lock().unwrap();
+        let cache = match caches.get_mut(&(conn as usize)) {
+            Some(c) => c,
+            None => return 0,
+        };
+        match cache.lookup_mut(sql_hash) {
+            Some(entry) => {
+                entry.last_used = now_secs();
+                entry.stmt_name
+            }
+            None => return 0,
+        }
     };
 
-    if let Some(entry) = cache.lookup_mut(sql_hash) {
-        entry.last_used = now_secs();
-        unsafe {
-            *stmt_name_out = entry.stmt_name.as_ptr();
-        }
-        return 1;
+    let name_ptr = stash_lookup_name(&name);
+    if name_ptr.is_null() {
+        return 0;
     }
-    0
+    unsafe {
+        *stmt_name_out = name_ptr;
+    }
+    1
 }
 
 /// Add statement to cache. Returns index on success, -1 on failure.
@@ -443,5 +479,80 @@ mod tests {
         cache.add(h2, name2, 1, 2);
         assert!(cache.lookup(1).is_some());
         assert!(cache.lookup(h2).is_some());
+    }
+
+    // ─── Regression: the name handed back by rust_stmt_cache_lookup ──────────
+    //
+    // `rust_stmt_cache_lookup` drops the STMT_CACHES mutex before it returns,
+    // so a `*const c_char` borrowed from the cache entry is only as stable as
+    // the cache itself. Callers hold that pointer across PQprepare and
+    // PQexecPrepared; meanwhile another thread on the same pooled connection
+    // can re-prepare, evict, clear or drop the entry. The returned name must
+    // therefore be a copy the caller owns for the duration of the call.
+    //
+    // A fake connection pointer is fine here: neither lookup nor a
+    // non-evicting add ever dereferences it.
+
+    #[test]
+    fn stmt_cache_lookup_name_is_stable_after_the_entry_is_rewritten() {
+        let conn = 0x51A7_0001_usize as *mut c_void;
+        let hash = 0xA11CE_u64;
+        let first = CString::new("stmt_first").unwrap();
+        let second = CString::new("stmt_second_name").unwrap();
+
+        assert!(rust_stmt_cache_add(conn, hash, first.as_ptr(), 0) >= 0);
+
+        let mut name: *const c_char = std::ptr::null();
+        assert_eq!(rust_stmt_cache_lookup(conn, hash, &mut name), 1);
+        assert!(!name.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(name) }.to_str().unwrap(),
+            "stmt_first"
+        );
+
+        // Another thread re-prepares the same SQL under a different name.
+        // `add` updates the existing entry in place, which is exactly the
+        // memory an aliasing pointer would be looking at.
+        assert!(rust_stmt_cache_add(conn, hash, second.as_ptr(), 0) >= 0);
+
+        assert_eq!(
+            unsafe { CStr::from_ptr(name) }.to_str().unwrap(),
+            "stmt_first",
+            "lookup handed back a pointer into the cache instead of a copy"
+        );
+
+        rust_stmt_cache_drop(conn);
+    }
+
+    #[test]
+    fn stmt_cache_lookup_name_survives_dropping_the_connection_cache() {
+        let conn = 0x51A7_0002_usize as *mut c_void;
+        let hash = 0xB0B_u64;
+        let only = CString::new("stmt_only").unwrap();
+
+        assert!(rust_stmt_cache_add(conn, hash, only.as_ptr(), 0) >= 0);
+
+        let mut name: *const c_char = std::ptr::null();
+        assert_eq!(rust_stmt_cache_lookup(conn, hash, &mut name), 1);
+
+        // Pool reuse drops the whole per-connection cache, freeing the Vec the
+        // entry lived in. The caller's pointer must not have pointed there.
+        rust_stmt_cache_drop(conn);
+
+        assert_eq!(
+            unsafe { CStr::from_ptr(name) }.to_str().unwrap(),
+            "stmt_only"
+        );
+    }
+
+    #[test]
+    fn stmt_cache_lookup_miss_leaves_the_out_pointer_null() {
+        let conn = 0x51A7_0003_usize as *mut c_void;
+        // Seed with something non-null so the assertion proves the miss path
+        // actively clears the out-parameter.
+        let sentinel = CString::new("untouched").unwrap();
+        let mut name: *const c_char = sentinel.as_ptr();
+        assert_eq!(rust_stmt_cache_lookup(conn, 0x4E4F5045_u64, &mut name), 0);
+        assert!(name.is_null());
     }
 }

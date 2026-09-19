@@ -39,7 +39,14 @@ pub fn rust_decltype_cache_insert(key: *const c_char, decltype_val: *const c_cha
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache.insert(key_str.to_string(), normalized_owned);
+    // Never replace a published entry. `rust_decltype_cache_lookup` returns a
+    // pointer into the stored CString and then drops the read guard; those
+    // pointers reach Plex as `sqlite3_column_decltype()` results, which stay
+    // valid until the statement is finalized. Replacing would drop the old
+    // CString and free it underneath every holder. Re-inserting a key is the
+    // normal case, not an edge one -- the decltype preload re-runs its whole
+    // pass whenever a previous attempt failed -- so first publication wins.
+    cache.entry(key_str.to_string()).or_insert(normalized_owned);
     1
 }
 
@@ -72,6 +79,9 @@ pub fn rust_oid_table_cache_insert(oid: c_uint, name: *const c_char) -> c_int {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
+    // `or_insert`, not `insert`: see `rust_decltype_cache_insert`. Lookups hand
+    // out pointers into these CStrings, so a published entry must never be
+    // dropped.
     cache.entry(oid).or_insert(cstr);
     1
 }

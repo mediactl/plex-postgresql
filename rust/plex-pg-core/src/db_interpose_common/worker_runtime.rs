@@ -64,11 +64,24 @@ extern "C" fn worker_thread_func(_arg: *mut c_void) -> *mut c_void {
     }
 }
 
+/// Start the worker thread if it is not already running.
+///
+/// Idempotent and safe to call from several threads at once: callers race here
+/// whenever a delegation finds no worker, and a second `pthread_create` would
+/// leave two workers sharing the single `worker_request` slot while orphaning
+/// the first `worker_thread` handle, which cleanup could then never join.
 pub fn rust_worker_init() -> c_int {
     unsafe {
+        let mut init_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(WORKER_INIT_MUTEX));
+        if worker_running != 0 {
+            init_guard.unlock();
+            return 0;
+        }
+
         let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
         if libc::pthread_attr_init(attr.as_mut_ptr()) != 0 {
             log_error("WORKER: Failed to init thread attributes");
+            init_guard.unlock();
             return -1;
         }
         let mut attr = attr.assume_init();
@@ -76,6 +89,7 @@ pub fn rust_worker_init() -> c_int {
         if libc::pthread_attr_setstacksize(&mut attr as *mut _, WORKER_STACK_SIZE) != 0 {
             log_error("WORKER: Failed to set stack size");
             libc::pthread_attr_destroy(&mut attr as *mut _);
+            init_guard.unlock();
             return -1;
         }
 
@@ -92,10 +106,12 @@ pub fn rust_worker_init() -> c_int {
             log_error("WORKER: Failed to create thread");
             worker_running = 0;
             libc::pthread_attr_destroy(&mut attr as *mut _);
+            init_guard.unlock();
             return -1;
         }
 
         libc::pthread_attr_destroy(&mut attr as *mut _);
+        init_guard.unlock();
         log_info_lazy!(
             "WORKER: Initialized with {} MB stack",
             WORKER_STACK_SIZE / (1024 * 1024)
@@ -122,7 +138,12 @@ pub(crate) unsafe fn fast_mark_fork_child_passthrough() {
 
 pub fn rust_worker_cleanup() {
     unsafe {
+        // Same lock as `rust_worker_init`, so a shutdown and a lazy start
+        // cannot overlap: otherwise one could hand `worker_running` back to 1
+        // while the other is joining the thread that flag refers to.
+        let mut init_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(WORKER_INIT_MUTEX));
         if worker_running == 0 {
+            init_guard.unlock();
             return;
         }
 
@@ -134,6 +155,7 @@ pub fn rust_worker_cleanup() {
         worker_guard.unlock();
 
         libc::pthread_join(worker_thread, ptr::null_mut());
+        init_guard.unlock();
     }
 
     log_info("WORKER: Cleaned up");
@@ -147,13 +169,19 @@ pub fn rust_delegate_prepare_to_worker(
     pz_tail: *mut *const c_char,
 ) -> c_int {
     unsafe {
-        if worker_running == 0 {
-            log_info("WORKER: Reinitializing after fork or deferred startup");
-            if rust_worker_init() != 0 {
-                log_error("WORKER: Not running, cannot delegate");
-                return SQLITE_ERROR;
-            }
+        // Unconditional: `rust_worker_init` returns immediately when a worker
+        // is already running. Testing `worker_running` here instead would be a
+        // check-then-act on an unsynchronised global, which is how two workers
+        // used to end up sharing one request slot.
+        if rust_worker_init() != 0 {
+            log_error("WORKER: Not running, cannot delegate");
+            return SQLITE_ERROR;
         }
+
+        // Held until the answer has been read out of the slot. There is one
+        // `worker_request` and one `worker_cond_response` for every caller, so
+        // without this a second delegation walks into the middle of the first.
+        let mut call_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(WORKER_CALL_MUTEX));
 
         let preview = crate::db_interpose_conn_utils::cstr_prefix(z_sql, 100, "NULL");
         log_debug_lazy!("WORKER: Delegating query ({})", preview);
@@ -188,6 +216,7 @@ pub fn rust_delegate_prepare_to_worker(
         let result = worker_request.result;
 
         worker_guard.unlock();
+        call_guard.unlock();
 
         log_debug_lazy!("WORKER: Delegation complete, rc={}", result);
         result

@@ -594,6 +594,42 @@ fn decltype_cache_alias_lookup_resolves_self_join_text_alias() {
 }
 
 #[test]
+fn decltype_cache_never_invalidates_a_published_entry() {
+    // `rust_decltype_cache_lookup` hands back a pointer into the CString held
+    // in the shared map and then drops the read guard. Those pointers reach
+    // Plex as `sqlite3_column_decltype()` results, which SQLite says stay
+    // valid until the statement is finalized. A replacing `insert` would drop
+    // the old CString and free it underneath every holder -- and the preload
+    // re-runs its whole pass whenever a previous attempt failed, so every key
+    // gets re-inserted.
+    let key = c("racecheck_published_col");
+    let first = c("dt_integer(8)");
+    let second = c("TEXT");
+
+    assert_eq!(rust_decltype_cache_insert(key.as_ptr(), first.as_ptr()), 1);
+    let published = rust_decltype_cache_lookup(key.as_ptr());
+    assert!(!published.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(published) }.to_str().unwrap(),
+        "dt_integer(8)"
+    );
+
+    // A second load pass over the same key must leave the published
+    // allocation exactly where it is.
+    rust_decltype_cache_insert(key.as_ptr(), second.as_ptr());
+
+    assert_eq!(
+        rust_decltype_cache_lookup(key.as_ptr()),
+        published,
+        "decltype entry was replaced, freeing a pointer already handed to the caller"
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(published) }.to_str().unwrap(),
+        "dt_integer(8)"
+    );
+}
+
+#[test]
 fn type_normalization_decltype_hash_matches_djb2() {
     let s = "dt_integer(8)";
     let cs = c(s);

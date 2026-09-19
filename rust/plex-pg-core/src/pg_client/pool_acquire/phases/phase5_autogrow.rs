@@ -33,7 +33,9 @@ pub(crate) fn phase5_autogrow(ctx: &AcquireCtx<'_>) -> AcquireDecision {
     }
 
     let slot = &ctx.pm.slots[idx];
-    if !slot.try_claim_free() {
+    // The slot we grew into must be empty before we store a connection in it;
+    // if it already holds one, phase 2 can reuse it on the next pass.
+    if !slot.try_claim_free_with_conn(std::ptr::null_mut()) {
         return AcquireDecision::Continue;
     }
 

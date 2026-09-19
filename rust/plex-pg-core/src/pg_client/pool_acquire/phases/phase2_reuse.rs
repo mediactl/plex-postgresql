@@ -21,7 +21,10 @@ pub(crate) fn phase2_reuse_existing(ctx: &AcquireCtx<'_>) -> AcquireDecision {
         if conn_is_streaming_active_ptr(conn as *mut PgConnection) {
             continue;
         }
-        if !slot.try_claim_free() {
+        // Claim against the pointer we sampled: the reaper can empty this
+        // slot and hand it back as FREE in the gap above, in which case `conn`
+        // is already on its way to PQfinish.
+        if !slot.try_claim_free_with_conn(conn) {
             continue;
         }
 

@@ -58,6 +58,28 @@ impl PoolSlot {
             .is_ok()
     }
 
+    /// CAS: FREE → RESERVED, but only if `conn` still holds `expected`.
+    ///
+    /// The acquire phases read `slot.conn` before they claim the slot, and the
+    /// reaper empties a FREE slot and puts it straight back to FREE before it
+    /// destroys the connection it took. A bare `try_claim_free` therefore says
+    /// nothing about whether the pointer the caller sampled is still the
+    /// slot's — the caller could walk away with one that is being PQfinished.
+    /// Re-reading `conn` under the claim closes that window: by then nobody
+    /// else can transition the slot, so what we see is what we get.
+    ///
+    /// Returns false with the slot left FREE if the connection moved.
+    pub fn try_claim_free_with_conn(&self, expected: *mut c_void) -> bool {
+        if !self.try_claim_free() {
+            return false;
+        }
+        if self.conn.load(Ordering::Acquire) == expected {
+            return true;
+        }
+        self.state.store(SLOT_FREE, Ordering::Release);
+        false
+    }
+
     /// CAS: READY → RECONNECTING. Returns true on success.
     pub fn try_begin_reconnect(&self) -> bool {
         self.state

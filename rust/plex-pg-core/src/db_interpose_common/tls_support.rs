@@ -1,6 +1,7 @@
 use std::mem::size_of;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
 
 #[repr(C)]
@@ -14,6 +15,11 @@ struct TlsState {
 }
 
 static TLS_INIT: Once = Once::new();
+/// Whether `TLS_KEY` holds a key we actually created. `pthread_key_t` is an
+/// opaque index and 0 is a perfectly ordinary key -- on glibc it is the one the
+/// *first* caller in the process gets -- so the key value cannot double as a
+/// success flag. Only the `pthread_key_create` return code says that.
+static TLS_KEY_VALID: AtomicBool = AtomicBool::new(false);
 static mut TLS_KEY: libc::pthread_key_t = 0;
 static mut TLS_FALLBACK: TlsState = TlsState {
     in_interpose_call: 0,
@@ -52,23 +58,32 @@ unsafe extern "C" fn tls_destructor(ptr: *mut c_void) {
     }
 }
 
-fn tls_key() -> libc::pthread_key_t {
+/// The process-wide TLS key, or `None` if one could not be created.
+fn tls_key() -> Option<libc::pthread_key_t> {
     TLS_INIT.call_once(|| unsafe {
         let mut key: libc::pthread_key_t = 0;
         if libc::pthread_key_create(&mut key as *mut _, Some(tls_destructor)) == 0 {
             TLS_KEY = key;
-        } else {
-            TLS_KEY = 0;
+            TLS_KEY_VALID.store(true, Ordering::Release);
         }
     });
-    unsafe { TLS_KEY }
+    if TLS_KEY_VALID.load(Ordering::Acquire) {
+        // SAFETY: `TLS_KEY` is written only inside `call_once`, which has
+        // already returned, and only on the path that sets `TLS_KEY_VALID`.
+        Some(unsafe { TLS_KEY })
+    } else {
+        None
+    }
 }
 
 unsafe fn tls_state() -> *mut TlsState {
-    let key = tls_key();
-    if key == 0 {
-        return ptr::addr_of_mut!(TLS_FALLBACK);
-    }
+    // `TLS_FALLBACK` is shared by every thread, so reaching it turns the
+    // per-thread reentrancy guards into process-wide ones. It is a last resort
+    // for a failed key or a failed allocation, never the normal path.
+    let key = match tls_key() {
+        Some(key) => key,
+        None => return ptr::addr_of_mut!(TLS_FALLBACK),
+    };
     let ptr_val = libc::pthread_getspecific(key) as *mut TlsState;
     if !ptr_val.is_null() {
         return ptr_val;

@@ -18,7 +18,10 @@ pub(crate) fn phase3_create_empty(ctx: &AcquireCtx<'_>) -> AcquireDecision {
         if !slot.conn.load(Ordering::Acquire).is_null() {
             continue;
         }
-        if !slot.try_claim_free() {
+        // Re-check emptiness under the claim: a slot filled and released
+        // between the load and the CAS would have its connection overwritten
+        // below, leaking it and its server-side backend.
+        if !slot.try_claim_free_with_conn(std::ptr::null_mut()) {
             continue;
         }
 
