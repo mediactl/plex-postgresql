@@ -936,29 +936,27 @@ mod ld_preload_wrappers {
         c_abi::my_sqlite3_column_decltype(stmt, idx)
     }
 
-    // Simple pass-through: let create_simple_converter proceed normally.
-    // The ASCII → UTF-8 redirect is now handled exclusively at the
-    // create_simple_codecvt level by the AArch64 global_asm hook above.
-    #[no_mangle]
-    #[allow(static_mut_refs)]
-    pub unsafe extern "C" fn _ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE(
-        s: *mut u8,
-    ) -> *mut c_void {
-        let orig = match ptr::read(ptr::addr_of!(ORIG_CREATE_SIMPLE_CONVERTER)) {
-            Some(f) => f,
-            None => {
-                let name = b"_ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE\0";
-                let sym = libc::dlsym(libc::RTLD_NEXT, name.as_ptr() as *const c_char);
-                if sym.is_null() {
-                    libc::abort();
-                }
-                let f = std::mem::transmute::<*mut c_void, CreateSimpleConverterFn>(sym);
-                ptr::write(ptr::addr_of_mut!(ORIG_CREATE_SIMPLE_CONVERTER), Some(f));
-                f
-            }
-        };
-        orig(s)
-    }
+    // boost::locale::util::create_simple_converter is deliberately NOT
+    // wrapped on x86-64.
+    //
+    // It returns std::unique_ptr<base_converter>, a class type, so the SysV
+    // ABI passes a hidden return slot in RDI and the real argument -- the
+    // encoding name, a const std::string& -- in RSI. A wrapper declared as
+    // `extern "C" fn(*mut u8) -> *mut c_void` reads RDI, so it forwarded the
+    // return slot to boost as if it were the encoding and dropped the name
+    // entirely. Boost read whatever was in that memory, could make no sense of
+    // it, and fell back to the one encoding its simple backend refuses:
+    //
+    //	boost::locale::conv::invalid_charset_error:
+    //	  Invalid or unsupported charset:Invalid simple encoding ASCII
+    //
+    // Plex aborts there while loading its translations, a second or two after
+    // its plug-ins come up, and never finishes starting.
+    //
+    // The wrapper described itself as a pass-through, which is precisely what
+    // not interposing the symbol achieves -- correctly, and for every ABI. The
+    // AArch64 asm hook below is a different mechanism and keeps its own
+    // handling of the sret pointer in x8.
     // Note: create_simple_codecvt is implemented as a global_asm hook above
     // (AArch64 only) to correctly preserve the x8 SRET pointer while
     // redirecting ASCII charset requests to create_utf8_codecvt.
