@@ -43,15 +43,19 @@ unsafe fn trace_pg_registration_translation_error(
     let _ = libc::fflush(stderr_ptr());
 }
 
-fn should_route_via_pg(pg_conn: *mut PgConnection, is_read: bool, is_write: bool) -> bool {
+/// Whether this connection is a live PostgreSQL connection to the library.
+fn pg_connection_serves_library(pg_conn: *mut PgConnection) -> bool {
     if pg_conn.is_null() {
         return false;
     }
     let c = unsafe { &*pg_conn };
     c.is_pg_active != 0
         && !c.conn.is_null()
-        && (is_read || is_write)
         && crate::db_interpose_helpers::rust_is_library_db_path(c.db_path.as_ptr()) != 0
+}
+
+fn should_route_via_pg(pg_conn: *mut PgConnection, is_read: bool, is_write: bool) -> bool {
+    pg_connection_serves_library(pg_conn) && (is_read || is_write)
 }
 
 pub(super) unsafe fn should_use_dummy_shadow(
@@ -176,8 +180,15 @@ pub(super) unsafe fn maybe_register_pg_stmt(
     pre_trans: &mut SqlTranslation,
     have_pre_trans: &mut bool,
 ) {
-    if !should_route_via_pg(pg_conn, is_read, is_write) || pp_stmt.is_null() || (*pp_stmt).is_null()
-    {
+    // Maintenance joins the routed statements even though it is neither a read
+    // nor a write: it has to reach the `is_pg = 3` no-op below rather than run
+    // against the shadow, where VACUUM fails inside an open transaction.
+    let routed = should_route_via_pg(pg_conn, is_read, is_write)
+        || (pg_connection_serves_library(pg_conn)
+            && crate::pg_config::is_maintenance_noop_str(
+                crate::db_interpose_helpers::cstr_to_str_or_empty(z_sql),
+            ));
+    if !routed || pp_stmt.is_null() || (*pp_stmt).is_null() {
         return;
     }
 

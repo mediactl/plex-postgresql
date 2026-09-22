@@ -11,6 +11,7 @@ pub(super) fn preprocess_sql(sql: &str) -> String {
     let sql = rewrite_transaction_control_statements(&sql);
     let sql = rewrite_pragma_statements(&sql);
     let sql = rewrite_sqlite_create_table_options(&sql);
+    let sql = rewrite_fts_index_rebuild(&sql);
     let sql = rewrite_virtual_tables(&sql);
     let sql = rewrite_glob(&sql);
     let sql = rewrite_indexed_by(&sql);
@@ -1236,6 +1237,104 @@ fn pragma_trace_mapping(
             PRAGMA_STRICT_FAIL.load(Ordering::Relaxed),
         );
     }
+}
+
+/// Answer Plex's full-text index rebuild with `SELECT 1`.
+///
+/// Plex decides its search index needs rebuilding when it opens a library an
+/// older server wrote, and tears the index down before building it back: eight
+/// `DROP TRIGGER`s and a `DROP TABLE` per index, then `CREATE VIRTUAL TABLE
+/// ... USING fts4`. None of the three survives the trip to PostgreSQL. SQLite's
+/// `DROP TRIGGER` names no table, so it arrives as "syntax error at end of
+/// input"; fts4 is not a virtual table module PostgreSQL has, so the create is
+/// a "syntax error at or near VIRTUAL"; and the drops report
+/// `"fts4_metadata_titles" is not a table`.
+///
+/// That last message is the one that settles what to do about it. Under this
+/// shim `fts4_metadata_titles` and its three siblings are *views* the schema
+/// provides over the real tables — the compatibility layer, not an index Plex
+/// owns. Letting the drops through wherever the syntax happened to be accepted
+/// would delete it.
+///
+/// So the rebuild is answered the way `VACUUM` and `REINDEX` are. Search is
+/// already served by other means; see `simplify_fts_for_sqlite`.
+///
+/// Scoped to the shim's own `fts4_*` objects: swallowing `DROP` in general
+/// would turn a real schema change into silence.
+fn rewrite_fts_index_rebuild(sql: &str) -> String {
+    // Tested whole, before splitting: a CREATE TRIGGER body ends its own
+    // statements, so splitting one on semicolons would leave a stray END
+    // behind after the head became SELECT 1.
+    if is_fts_index_rebuild(sql.trim()) {
+        return "SELECT 1".to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for stmt in split_sql_statements(sql) {
+        let t = stmt.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if is_fts_index_rebuild(t) {
+            out.push("SELECT 1".to_string());
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    out.join("; ")
+}
+
+fn is_fts_index_rebuild(stmt: &str) -> bool {
+    let lower = stmt.to_ascii_lowercase();
+
+    // CREATE VIRTUAL TABLE <any> USING fts4(...). The module is what makes it
+    // untranslatable, so this does not depend on the name; the ICU pair also
+    // names a tokenizer only Plex's own SQLite has.
+    if lower.starts_with("create virtual table ") && lower.contains(" using fts4") {
+        return true;
+    }
+
+    for prefix in ["drop table ", "drop trigger "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("if exists ").unwrap_or(rest);
+        if names_fts_object(rest.trim_start()) {
+            return true;
+        }
+    }
+
+    // The other half of the rebuild: the triggers that keep the index in step
+    // with metadata_items and tags. They maintain a view here, so they have
+    // nothing to maintain, and their SQLite bodies do not parse as PostgreSQL.
+    if let Some(rest) = lower.strip_prefix("create trigger ") {
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("if not exists ").unwrap_or(rest);
+        if names_fts_object(rest.trim_start()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether what follows names one of the shim's `fts4_*` objects, quoted or not.
+///
+/// Only the leading identifier is considered. The rest of a CREATE TRIGGER is
+/// its body, and a body mentions `old.rowid` -- so anything that reaches for
+/// the first `.` in the whole remainder ends up asking whether `rowid` is an
+/// fts4 object, and concludes the statement is nothing to do with the index.
+fn names_fts_object(rest: &str) -> bool {
+    let token = rest
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';' || c == ',')
+        .next()
+        .unwrap_or("");
+    let name = token.trim_start_matches(['"', '\'', '`', '[']);
+    // A schema-qualified name is the same object: main.fts4_tag_titles.
+    let name = match name.split_once('.') {
+        Some((_, tail)) => tail.trim_start_matches(['"', '\'', '`', '[']),
+        None => name,
+    };
+    name.starts_with("fts4_")
 }
 
 /// Rewrite SQLite virtual table DDL to PostgreSQL-compatible CREATE TABLE.

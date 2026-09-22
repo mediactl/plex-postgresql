@@ -400,6 +400,114 @@ mod tests {
         assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
     }
 
+    // ── Plex rebuilding its full-text index ────────────────────────────────
+    //
+    // Plex decides its search index needs rebuilding when it opens a library
+    // an older server wrote, and tears the index down before building it back:
+    // it drops eight triggers and the table per index, then issues CREATE
+    // VIRTUAL TABLE ... USING fts4. None of that is expressible here, and none
+    // of it should be. Under this shim `fts4_metadata_titles` and friends are
+    // *views* the schema provides over the real tables, so letting the drops
+    // through would delete the compatibility layer rather than an index Plex
+    // owns -- PostgreSQL says as much, "fts4_metadata_titles" is not a table.
+    //
+    // So the whole rebuild is a no-op, the same answer VACUUM and REINDEX get.
+    // Search is already served by other means; see simplify_fts_for_sqlite.
+    //
+    // Without this, Plex 1.43.4 against a library dumped from 1.43.0 fails
+    // every one of these statements and exits before it serves:
+    //   Unable to set up server: sqlite3_statement_backend::loadOne
+    // The statements below are copied from that server's own log.
+
+    #[test]
+    fn subset_fts__rebuilding_the_search_index_does_not_drop_the_compatibility_views() {
+        let r = translate("drop table if exists fts4_metadata_titles").unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+
+        let r = translate("drop table if exists fts4_tag_titles_icu").unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+    }
+
+    #[test]
+    fn subset_fts__dropping_one_of_the_index_triggers_is_a_no_op() {
+        // PostgreSQL needs DROP TRIGGER <name> ON <table>; SQLite's form has no
+        // table, so this reaches the server as "syntax error at end of input".
+        let r = translate("drop trigger if exists fts4_metadata_titles_after_insert").unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+
+        let r = translate("drop trigger if exists fts4_tag_titles_before_delete_icu").unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+    }
+
+    #[test]
+    fn subset_fts__recreating_an_fts4_index_is_a_no_op() {
+        // rewrite_virtual_tables knows fts5 and rtree. Plex writes fts4, which
+        // fell through untouched and reached PostgreSQL as CREATE VIRTUAL
+        // TABLE -- "syntax error at or near VIRTUAL".
+        let r = translate(
+            "CREATE VIRTUAL TABLE fts4_metadata_titles USING fts4(title, title_sort, original_title)",
+        )
+        .unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+    }
+
+    #[test]
+    fn subset_fts__the_icu_index_carries_a_tokenizer_and_is_still_a_no_op() {
+        // The ICU pair names a tokenizer that only Plex's SQLite has, so this
+        // one cannot be translated even in principle.
+        let r = translate(concat!(
+            "CREATE VIRTUAL TABLE fts4_tag_titles_icu USING fts4(tag, ",
+            "tokenize=collating 'root@colStrength=primary;colAlternate=shifted')"
+        ))
+        .unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+    }
+
+    #[test]
+    fn subset_fts__recreating_one_of_the_index_triggers_is_a_no_op() {
+        // The other half of the rebuild: having dropped the triggers that keep
+        // the index in step with metadata_items, Plex writes them back. They
+        // maintain an fts4 table that is a view here, so they have nothing to
+        // maintain and PostgreSQL cannot parse their SQLite bodies anyway --
+        // "syntax error at or near BEGIN", then at or near "new".
+        let r = translate(concat!(
+            "CREATE TRIGGER fts4_metadata_titles_before_delete BEFORE DELETE ON metadata_items ",
+            "BEGIN DELETE FROM fts4_metadata_titles WHERE docid=old.rowid; END"
+        ))
+        .unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+    }
+
+    #[test]
+    fn subset_fts__an_index_trigger_whose_body_holds_a_semicolon_is_still_one_statement() {
+        // A trigger body carries its own statement terminator, so anything
+        // that splits on semicolons first turns this into "SELECT 1; END".
+        let r = translate(concat!(
+            "CREATE TRIGGER fts4_tag_titles_after_insert AFTER INSERT ON tags ",
+            "WHEN new.tag_type in (0,1,2,4,6,207,400) ",
+            "BEGIN INSERT INTO fts4_tag_titles(docid, tag) VALUES(new.rowid, new.tag); END"
+        ))
+        .unwrap();
+        assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
+        assert!(!r.sql.to_uppercase().contains("END"), "{}", r.sql);
+    }
+
+    #[test]
+    fn subset_fts__a_drop_that_is_not_part_of_the_index_still_runs() {
+        // The no-op is scoped to the shim's own fts4 objects. Swallowing DROP
+        // generally would turn a real schema change into silence.
+        let r = translate("drop table if exists metadata_items").unwrap();
+        let up = r.sql.to_uppercase();
+        assert!(up.contains("DROP TABLE"), "{}", r.sql);
+
+        let r = translate("drop trigger if exists metadata_items_after_insert").unwrap();
+        assert!(
+            r.sql.to_uppercase().contains("DROP TRIGGER"),
+            "{}",
+            r.sql
+        );
+    }
+
     #[test]
     fn subset_core__keyword_create_table_without_rowid_strict_stripped() {
         let r = translate("CREATE TABLE t(id INTEGER PRIMARY KEY) WITHOUT ROWID, STRICT").unwrap();

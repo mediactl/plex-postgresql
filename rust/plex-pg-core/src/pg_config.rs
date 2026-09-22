@@ -70,6 +70,29 @@ pub(crate) fn is_sqlite_passthrough_str(sql: &str) -> bool {
         || lower.contains("sqlite_schema")
 }
 
+/// Whether the statement is database maintenance that produces no rows.
+///
+/// These are on the skip list like everything else, but they need registering
+/// as a no-op even though they are neither a read nor a write, which is the
+/// condition the routing gate otherwise applies. Left to fall through they run
+/// against the shadow SQLite, and `VACUUM` is refused there whenever a
+/// transaction is open — as one is while Plex applies migrations, which is
+/// exactly when it vacuums.
+///
+/// Deliberately narrower than the skip list. `PRAGMA` is skipped too, but Plex
+/// reads the row it returns, so it has to keep reaching the shadow.
+pub(crate) fn is_maintenance_noop_str(sql: &str) -> bool {
+    let trimmed = strip_leading_ws_and_sql_comments(sql);
+    let lower = trimmed.to_lowercase();
+    for kw in ["vacuum", "reindex"] {
+        if lower == kw || lower.strip_prefix(kw).is_some_and(|r| r.starts_with(char::is_whitespace))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Returns true if the SQL statement should be skipped (treated as a no-op).
 /// Step returns SQLITE_DONE without executing anything.
 /// NOTE: SQLite engine config (fts3_tokenizer, icu_load_collation, load_extension)
@@ -545,6 +568,35 @@ mod tests {
     #[test]
     fn skip_vacuum() {
         assert!(should_skip_sql_str("VACUUM"));
+    }
+
+    // Plex vacuums the library after it finishes a batch of migrations, which
+    // is the first time anything asks this shim to run one. Being on the skip
+    // list is not enough on its own: a skipped statement is only registered as
+    // a no-op when it also looks like a read or a write, and VACUUM is
+    // neither, so it reached the shadow SQLite instead -- inside the
+    // transaction the migrations were running in, where SQLite refuses it. The
+    // server gave up there:
+    //   Unable to set up server: sqlite3_statement_backend::loadOne
+    // BEGIN and COMMIT take the same path and hid the gap, because they
+    // succeed against the shadow.
+    #[test]
+    fn maintenance_statements_return_no_rows_and_so_can_be_answered_with_done() {
+        assert!(is_maintenance_noop_str("VACUUM"));
+        assert!(is_maintenance_noop_str("  vacuum  "));
+        assert!(is_maintenance_noop_str("VACUUM main"));
+        assert!(is_maintenance_noop_str("REINDEX"));
+        assert!(is_maintenance_noop_str("reindex nocase"));
+    }
+
+    #[test]
+    fn a_statement_that_returns_rows_is_not_a_maintenance_no_op() {
+        // PRAGMA is skipped too, but Plex reads its answer, so it must keep
+        // going to the shadow rather than being answered with DONE.
+        assert!(!is_maintenance_noop_str("PRAGMA foreign_keys"));
+        assert!(!is_maintenance_noop_str("SELECT 1"));
+        assert!(!is_maintenance_noop_str("BEGIN"));
+        assert!(!is_maintenance_noop_str("vacuuming_is_not_a_word"));
     }
 
     #[test]
