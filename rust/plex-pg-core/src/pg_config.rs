@@ -68,6 +68,14 @@ pub(crate) fn is_sqlite_passthrough_str(sql: &str) -> bool {
         || lower.starts_with("select icu_load_collation")
         || lower.contains("sqlite_master")
         || lower.contains("sqlite_schema")
+        // What ANALYZE collected for SQLite's query planner. Nothing here
+        // defines these -- not the dump, not the shadow schema -- so sending
+        // them to PostgreSQL only produced `relation "main.sqlite_stat1" does
+        // not exist` on every start. They belong to SQLite, and go where
+        // sqlite_master goes: the shadow answers "no such table", which is
+        // what Plex sees on any library nothing has analyzed.
+        || lower.contains("sqlite_stat1")
+        || lower.contains("sqlite_stat4")
 }
 
 /// Whether the statement is database maintenance that produces no rows.
@@ -629,6 +637,37 @@ mod tests {
         assert!(!should_skip_sql_str("fts3_tokenizer('simple')"));
         assert!(is_sqlite_passthrough_str("fts3_tokenizer('simple')"));
         assert!(is_sqlite_passthrough_str("SELECT fts3_tokenizer(?, ?)"));
+    }
+
+    // sqlite_stat1 holds what ANALYZE collected for SQLite's query planner.
+    // It belongs to SQLite the way sqlite_master does, and goes the same way:
+    // to the shadow, where a database nothing has analyzed answers "no such
+    // table" -- which is what Plex sees on any fresh library, and handles.
+    //
+    // Sent to PostgreSQL instead it became an error on every start, because
+    // nothing in the dump defines it:
+    //   relation "main.sqlite_stat1" does not exist
+    //   LINE 1: SELECT tbl, idx, stat FROM "main".sqlite_stat1
+    // Plex reads these statistics to plan queries it no longer plans, so the
+    // answer is the same either way; only the noise differs.
+    #[test]
+    fn the_planner_statistics_tables_belong_to_sqlite() {
+        assert!(is_sqlite_passthrough_str(
+            "SELECT tbl, idx, stat FROM \"main\".sqlite_stat1"
+        ));
+        assert!(is_sqlite_passthrough_str("SELECT * FROM sqlite_stat1"));
+        // SQLite writes sqlite_stat4 too when built with it.
+        assert!(is_sqlite_passthrough_str("SELECT * FROM sqlite_stat4"));
+    }
+
+    #[test]
+    fn a_table_of_ours_that_merely_holds_statistics_is_not_sqlites() {
+        // Plex has its own statistics_* tables, and those are real library
+        // data that has to keep going to PostgreSQL.
+        assert!(!is_sqlite_passthrough_str(
+            "SELECT at FROM statistics_bandwidth WHERE account_id = ?"
+        ));
+        assert!(!is_sqlite_passthrough_str("SELECT * FROM statistics_media"));
     }
 
     #[test]
