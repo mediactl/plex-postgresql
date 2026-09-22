@@ -61,6 +61,16 @@ fn signal_log_enabled() -> bool {
     enabled
 }
 
+/// Whether to print a backtrace from every `__cxa_throw`.
+///
+/// Separate from the catcher: the catcher decides whether the shim inspects
+/// the exception at all, and this is diagnostic output that is far too loud to
+/// leave on. It is read on every throw rather than cached, so it can be turned
+/// on for one run without a rebuild.
+fn exception_backtrace_enabled() -> bool {
+    env_utils::env_truthy(b"PLEX_PG_EXCEPTION_BACKTRACE\0")
+}
+
 fn exception_catcher_enabled() -> bool {
     let cached = EXCEPTION_CATCHER_ENABLED_CACHED.load(Ordering::Acquire);
     if cached != -1 {
@@ -194,6 +204,17 @@ pub unsafe extern "C" fn __cxa_throw(
         Some(f) => f,
         None => libc::abort(),
     };
+
+    // A backtrace taken here is the only view of where the exception came
+    // from. Once it has been thrown the frames below the throw are gone, and
+    // a minidump written by the terminate handler shows the unwinder rather
+    // than the code that threw.
+    if exception_backtrace_enabled() {
+        crate::platform_backtrace::platform_print_backtrace(
+            b"__cxa_throw\0".as_ptr() as *const c_char,
+            1,
+        );
+    }
 
     if !exception_catcher_enabled() {
         orig(thrown_exception, tinfo, dest);

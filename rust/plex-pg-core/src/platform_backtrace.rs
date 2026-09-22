@@ -63,7 +63,73 @@ unsafe fn collect_frames(frames: &mut [*mut c_void]) -> usize {
 }
 
 #[cfg(target_os = "linux")]
+mod unwind_ffi {
+    use std::os::raw::{c_int, c_void};
+
+    pub const URC_NO_REASON: c_int = 0;
+    pub const URC_END_OF_STACK: c_int = 5;
+
+    extern "C" {
+        pub fn _Unwind_Backtrace(
+            trace: extern "C" fn(*mut c_void, *mut c_void) -> c_int,
+            trace_argument: *mut c_void,
+        ) -> c_int;
+        pub fn _Unwind_GetIP(ctx: *mut c_void) -> usize;
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct UnwindCollector {
+    frames: *mut *mut c_void,
+    capacity: usize,
+    depth: usize,
+}
+
+#[cfg(target_os = "linux")]
+extern "C" fn unwind_collect(ctx: *mut c_void, arg: *mut c_void) -> c_int {
+    let collector = unsafe { &mut *(arg as *mut UnwindCollector) };
+    if collector.depth >= collector.capacity {
+        return unwind_ffi::URC_END_OF_STACK;
+    }
+    let ip = unsafe { unwind_ffi::_Unwind_GetIP(ctx) };
+    if ip == 0 {
+        return unwind_ffi::URC_END_OF_STACK;
+    }
+    unsafe { *collector.frames.add(collector.depth) = ip as *mut c_void };
+    collector.depth += 1;
+    unwind_ffi::URC_NO_REASON
+}
+
+/// Walk the stack with the DWARF unwinder, falling back to the frame-pointer
+/// chain.
+///
+/// The frame-pointer walk reports nothing inside Plex, which is built without
+/// them. `_Unwind_Backtrace` reads the same CFI the exception machinery does,
+/// so it works whatever the register allocator did -- but only because this
+/// library now links libgcc statically and keeps its symbols local. While
+/// libgcc_s was a shared dependency, `_Unwind_Backtrace` came from libgcc and
+/// `_Unwind_GetIP` from the copy inside Plex's libc++, and handing one
+/// unwinder's context to the other segfaults. See the link step in
+/// scripts/docker-build-shim.sh.
+#[cfg(target_os = "linux")]
 unsafe fn collect_frames(frames: &mut [*mut c_void]) -> usize {
+    let mut collector = UnwindCollector {
+        frames: frames.as_mut_ptr(),
+        capacity: frames.len(),
+        depth: 0,
+    };
+    unwind_ffi::_Unwind_Backtrace(
+        unwind_collect,
+        &mut collector as *mut UnwindCollector as *mut c_void,
+    );
+    if collector.depth > 0 {
+        return collector.depth;
+    }
+    collect_frames_fp(frames)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn collect_frames_fp(frames: &mut [*mut c_void]) -> usize {
     let mut depth = 0usize;
     let mut fp = current_frame_ptr();
     let mut iterations = 0usize;
