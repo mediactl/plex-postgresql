@@ -62,6 +62,33 @@ fn sqlite_type_for_oid(oid: u32) -> c_int {
     pg_oid_to_sqlite_type_impl(oid)
 }
 
+/// What `sqlite3_column_type` reports for a column whose value is NULL.
+///
+/// SQLite answers SQLITE_NULL, and callers rely on it to tell "no value" from
+/// "empty value". Reporting the column's declared type instead tells Plex a
+/// NULL text column holds an empty string, and Plex then parses it. On the
+/// LEFT JOIN behind `GET /`, `plugin_prefixes.prefix` is NULL for every plugin
+/// without a prefix; told it is TEXT, Plex looks for the second '/' in "",
+/// does not find it, and builds a substring at the resulting negative offset:
+///
+///     libc++abi: terminating with uncaught exception of type
+///     std::out_of_range: basic_string
+///
+/// That kills the server a second after it starts serving.
+///
+/// This used to derive the type from the PG OID for every NULL, to stop SOCI
+/// throwing `std::bad_cast` when the holder it allocated from
+/// `sqlite3_column_decltype` did not match. Real SQLite returns SQLITE_NULL
+/// and SOCI copes, so a bad_cast means the decltype is wrong and that is the
+/// bug to fix. `PLEX_PG_NULL_COLUMN_TYPE_FROM_OID=1` restores the old answer
+/// for a side-by-side comparison.
+fn null_column_type(oid: u32) -> c_int {
+    if crate::env_utils::env_truthy(b"PLEX_PG_NULL_COLUMN_TYPE_FROM_OID\0") {
+        return sqlite_type_for_oid(oid);
+    }
+    SQLITE_NULL
+}
+
 unsafe fn load_cached_type_state(pg_stmt: &mut PgStmt, idx: c_int) -> Option<CachedTypeState> {
     let cached = &*pg_stmt.cached_result;
     let row = pg_stmt.current_row;
@@ -144,19 +171,10 @@ unsafe fn resolve_cached_column_type(
     ctx.trace_col = trace_col;
 
     if state.is_null {
-        // For NULL values, derive the SQLite type from the PG OID instead of
-        // returning SQLITE_NULL. SOCI's post_fetch does dynamic_cast based on
-        // the type reported by column_type(). If we return SQLITE_NULL but SOCI
-        // allocated a typed holder (int/text/etc.) based on column_decltype(),
-        // the cast fails with std::bad_cast.
-        let oid_type = sqlite_type_for_oid(state.oid);
-        if oid_type != SQLITE_NULL {
-            ctx.result = oid_type;
-            ctx.is_null = true;
-            return (oid_type, ctx);
-        }
+        let result = null_column_type(state.oid);
+        ctx.result = result;
         ctx.is_null = true;
-        return (SQLITE_NULL, ctx);
+        return (result, ctx);
     }
 
     if !state.value_ptr.is_null() {
@@ -315,19 +333,10 @@ unsafe fn resolve_live_column_type(
     // --- seqlock: end CRASH_LAST_COLUMN write ---
 
     if state.is_null {
-        // For NULL values, derive the SQLite type from the PG OID instead of
-        // returning SQLITE_NULL. SOCI's post_fetch does dynamic_cast based on
-        // the type reported by column_type(). If we return SQLITE_NULL but SOCI
-        // allocated a typed holder (int/text/etc.) based on column_decltype(),
-        // the cast fails with std::bad_cast.
-        let oid_type = sqlite_type_for_oid(state.oid);
-        if oid_type != SQLITE_NULL {
-            ctx.result = oid_type;
-            ctx.is_null = true;
-            return (oid_type, ctx);
-        }
+        let result = null_column_type(state.oid);
+        ctx.result = result;
         ctx.is_null = true;
-        return (SQLITE_NULL, ctx);
+        return (result, ctx);
     }
 
     if state.value_len >= 0 {
@@ -482,5 +491,28 @@ mod tests {
     fn null_oid_mapping_keeps_timestamp_columns_integer() {
         assert_eq!(sqlite_type_for_oid(1114), SQLITE_INTEGER);
         assert_eq!(sqlite_type_for_oid(1184), SQLITE_INTEGER);
+    }
+
+    // A NULL column has to read as NULL whatever it was declared as. Reported
+    // as TEXT, a NULL `plugin_prefixes.prefix` reaches Plex as an empty string
+    // that it then parses as a path, and the server dies on GET / with
+    // std::out_of_range. OID 25 is text, 23 is int4.
+    #[test]
+    fn a_null_column_reads_as_null_whatever_its_postgres_type_is() {
+        for oid in [25u32, 23, 20, 16, 1114, 701, 17] {
+            assert_eq!(
+                null_column_type(oid),
+                SQLITE_NULL,
+                "oid {oid} should report SQLITE_NULL when the value is NULL"
+            );
+        }
+    }
+
+    #[test]
+    fn the_old_answer_is_still_reachable_for_comparison() {
+        std::env::set_var("PLEX_PG_NULL_COLUMN_TYPE_FROM_OID", "1");
+        assert_eq!(null_column_type(25), SQLITE_TEXT);
+        assert_eq!(null_column_type(23), SQLITE_INTEGER);
+        std::env::remove_var("PLEX_PG_NULL_COLUMN_TYPE_FROM_OID");
     }
 }
