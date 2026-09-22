@@ -73,6 +73,15 @@ if [ ! -f "${LIBPLEX_PG_CORE_A}" ]; then
     exit 1
 fi
 
+# -static-libgcc, and libgcc's symbols kept local, so that this library does
+# not put a second stack unwinder in the process.
+#
+# Plex's libc++ has LLVM's libunwind linked into it and exports ten _Unwind_*
+# symbols. libgcc_s.so.1 exports the same ten and eight more. Loading both
+# leaves the process resolving one call to one implementation and the next to
+# the other, and an _Unwind_Context built by one is not readable by the other.
+# Linking libgcc in statically and hiding its symbols leaves libc++'s unwinder
+# as the only one, which is the one Plex's own exceptions were compiled for.
 gcc -shared -fPIC -fno-stack-protector \
     -std=c11 -D_GNU_SOURCE $ARCH_FLAGS $SANITIZE_FLAGS \
     -o db_interpose_pg.so \
@@ -81,6 +90,8 @@ gcc -shared -fPIC -fno-stack-protector \
     -L/usr/local/pgsql/lib -lpq \
     -lstdc++ \
     -ldl -lpthread \
+    -static-libgcc \
+    -Wl,--exclude-libs,libgcc.a:libgcc_eh.a \
     $SANITIZE_LDFLAGS \
     -Wl,-rpath,/usr/local/lib/plex-postgresql \
     -Wl,-rpath,/usr/lib/plexmediaserver/lib
