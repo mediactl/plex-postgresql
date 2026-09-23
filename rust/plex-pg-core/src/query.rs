@@ -19,6 +19,7 @@ use sqlparser::ast::*;
 use sqlparser::tokenizer::Span;
 
 use crate::rewriter::ast_utils::{take_boxed_expr, take_expr, wrap_double_colon_cast};
+use std::cell::RefCell;
 
 pub fn transform(stmt: &mut Statement) {
     match stmt {
@@ -29,11 +30,19 @@ pub fn transform(stmt: &mut Statement) {
             }
         }
         Statement::Update(u) => {
+            let _scope =
+                TextColumnScope::for_tables(&table_names_in(std::slice::from_ref(&u.table)));
             if let Some(sel) = &mut u.selection {
                 transform_expr(sel);
             }
         }
         Statement::Delete(d) => {
+            let tables = match &d.from {
+                FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => {
+                    table_names_in(t)
+                }
+            };
+            let _scope = TextColumnScope::for_tables(&tables);
             if let Some(sel) = &mut d.selection {
                 transform_expr(sel);
             }
@@ -96,6 +105,8 @@ fn transform_set_expr(se: &mut SetExpr) {
 }
 
 fn transform_select(sel: &mut Select) {
+    let _scope = TextColumnScope::for_tables(&table_names_in(&sel.from));
+
     // Fix FROM subqueries without alias
     for twj in &mut sel.from {
         fix_table_with_joins(twj);
@@ -883,6 +894,79 @@ fn is_metadata_type_eq(expr: &Expr, value: i64) -> bool {
 /// Known columns that are stored as TEXT in Plex but sometimes compared with integers
 const KNOWN_TEXT_COLUMNS: &[&str] = &["status", "state", "downloaded", "metadata_item_id"];
 
+/// Text columns that cannot go in the list above because the same name is an
+/// integer in another table, so they are only text in the tables named here.
+///
+/// schema_migrations.version is text; play_queues.version and
+/// metadata_item_clusterings.version are integers. Plex writes the migration
+/// version unquoted -- `where version=202608120900` -- which SQLite compares as
+/// text by affinity and PostgreSQL rejects outright: twelve digits is a bigint,
+/// and the schema's compat operators only pair text with integer.
+const KNOWN_TEXT_COLUMNS_BY_TABLE: &[(&str, &[&str])] = &[("schema_migrations", &["version"])];
+
+thread_local! {
+    /// The per-table text columns in force for the statement being
+    /// transformed. `transform_expr` walks expressions without knowing which
+    /// table they belong to, so the statement-level walk sets this before
+    /// descending; nested queries push their own and restore on the way out.
+    static STATEMENT_TEXT_COLUMNS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Scopes `STATEMENT_TEXT_COLUMNS` to the tables of one statement, restoring
+/// whatever an enclosing statement had set when dropped.
+struct TextColumnScope {
+    previous: Vec<&'static str>,
+}
+
+impl TextColumnScope {
+    fn for_tables(tables: &[String]) -> Self {
+        let mut columns: Vec<&'static str> = Vec::new();
+        for table in tables {
+            let table = table.to_lowercase();
+            let table = table.rsplit('.').next().unwrap_or(&table);
+            for (known, cols) in KNOWN_TEXT_COLUMNS_BY_TABLE {
+                if *known == table {
+                    columns.extend_from_slice(cols);
+                }
+            }
+        }
+        let previous = STATEMENT_TEXT_COLUMNS.with(|c| std::mem::replace(&mut *c.borrow_mut(), columns));
+        Self { previous }
+    }
+}
+
+impl Drop for TextColumnScope {
+    fn drop(&mut self) {
+        let previous = std::mem::take(&mut self.previous);
+        STATEMENT_TEXT_COLUMNS.with(|c| *c.borrow_mut() = previous);
+    }
+}
+
+/// The real table names in a FROM list -- not aliases, which is what the
+/// per-table list is keyed by. Joined tables count too: a column in the WHERE
+/// may belong to any of them.
+fn table_names_in(from: &[TableWithJoins]) -> Vec<String> {
+    fn name_of(factor: &TableFactor) -> Option<String> {
+        if let TableFactor::Table { name, .. } = factor {
+            if let Some(ObjectNamePart::Identifier(ident)) = name.0.last() {
+                return Some(ident.value.clone());
+            }
+        }
+        None
+    }
+    let mut names = Vec::new();
+    for twj in from {
+        names.extend(name_of(&twj.relation));
+        names.extend(twj.joins.iter().filter_map(|j| name_of(&j.relation)));
+    }
+    names
+}
+
+fn is_known_text_column(col: &str) -> bool {
+    KNOWN_TEXT_COLUMNS.contains(&col)
+        || STATEMENT_TEXT_COLUMNS.with(|c| c.borrow().contains(&col))
+}
+
 /// Known columns that are stored as INTEGER in Plex but sometimes compared with strings
 const KNOWN_INT_COLUMNS: &[&str] = &["id"];
 
@@ -1150,12 +1234,12 @@ fn is_string_literal(expr: &Expr) -> bool {
 fn should_fix_int_text_mismatch(left: &Expr, right: &Expr) -> bool {
     // Pattern A: known_text_col = number → cast number to text
     if let Some(col) = get_column_name(left) {
-        if KNOWN_TEXT_COLUMNS.contains(&col.as_str()) && is_number_literal(right) {
+        if is_known_text_column(&col) && is_number_literal(right) {
             return true;
         }
     }
     if let Some(col) = get_column_name(right) {
-        if KNOWN_TEXT_COLUMNS.contains(&col.as_str()) && is_number_literal(left) {
+        if is_known_text_column(&col) && is_number_literal(left) {
             return true;
         }
     }
@@ -1185,7 +1269,7 @@ fn fix_int_text_mismatch(mut left: Expr, op: BinaryOperator, mut right: Expr) ->
 
     if left_col
         .as_ref()
-        .map(|c| KNOWN_TEXT_COLUMNS.contains(&c.as_str()))
+        .map(|c| is_known_text_column(c))
         .unwrap_or(false)
         && is_number_literal(&right)
     {
@@ -1203,7 +1287,7 @@ fn fix_int_text_mismatch(mut left: Expr, op: BinaryOperator, mut right: Expr) ->
         }
     } else if right_col
         .as_ref()
-        .map(|c| KNOWN_TEXT_COLUMNS.contains(&c.as_str()))
+        .map(|c| is_known_text_column(c))
         .unwrap_or(false)
         && is_number_literal(&left)
     {
@@ -1483,6 +1567,68 @@ fn wrap_lower(expr: Expr) -> Expr {
 #[allow(non_snake_case)]
 mod tests {
     use crate::translate;
+
+    #[test]
+    fn schema_migrations_version_compares_as_text_even_to_a_bigint_literal() {
+        // schema_migrations.version is text. Plex writes the literal unquoted
+        // -- `where version=202608120900` -- which SQLite compares as text by
+        // affinity and PostgreSQL rejects: twelve digits is a bigint, and
+        // the schema's compat operators only pair text with integer. It
+        // failed on every start, three times per start on a three-pod
+        // cluster, and would have kept Plex from recording a rollback.
+        let r = translate("DELETE FROM schema_migrations where version=202608120900").unwrap();
+        let sql = r.sql.to_lowercase();
+        assert!(
+            sql.contains("version = 202608120900::text"),
+            "the literal must be compared as text, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn schema_migrations_version_is_text_under_an_alias_too() {
+        let r = translate("DELETE FROM schema_migrations AS sm WHERE sm.version = 202608120900")
+            .unwrap();
+        assert!(
+            r.sql.to_lowercase().contains("202608120900::text"),
+            "the alias must not hide the table, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn a_subquery_on_an_integer_version_table_keeps_its_own_scope() {
+        // The outer statement is on schema_migrations; the subquery is on
+        // play_queues, where version is an integer. Each must be judged by
+        // its own table, and the outer scope must come back after the inner.
+        let r = translate(
+            "DELETE FROM schema_migrations WHERE version = 202608120900 \
+             AND 1 IN (SELECT id FROM play_queues WHERE version = 3) AND version <> 5",
+        )
+        .unwrap();
+        let sql = r.sql.to_lowercase();
+        assert!(sql.contains("version = 202608120900::text"), "outer, before: {}", r.sql);
+        assert!(!sql.contains("version = 3::text"), "inner must not be cast: {}", r.sql);
+        assert!(sql.contains("version <> 5::text"), "outer, after the subquery: {}", r.sql);
+    }
+
+    #[test]
+    fn an_integer_version_column_is_left_alone() {
+        // `version` is only text in schema_migrations; play_queues and
+        // metadata_item_clusterings store an integer. A cast there would
+        // turn a correct comparison into a text one.
+        for sql in [
+            "SELECT id FROM play_queues WHERE version = 5",
+            "UPDATE metadata_item_clusterings SET title = 'x' WHERE version = 12",
+        ] {
+            let r = translate(sql).unwrap();
+            assert!(
+                !r.sql.to_lowercase().contains("::text"),
+                "integer version must not be cast, got: {}",
+                r.sql
+            );
+        }
+    }
 
     #[test]
     fn compat_aliases__query_subquery_gets_alias() {
