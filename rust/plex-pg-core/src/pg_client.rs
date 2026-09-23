@@ -37,7 +37,7 @@ pub use crate::pg_client_stmt_cache::{
     rust_stmt_cache_lookup,
 };
 pub use c_abi::*;
-use config::parse_positive_env_or_default;
+use config::{effective_pool_max, parse_positive_env_or_default};
 pub(crate) use connection_helpers::current_thread_has_other_streaming_connection;
 use connection_helpers::{conn_db_path, conn_is_pg_active_ptr};
 use connection_lifecycle::{close_handle_connection, destroy_pool_connection};

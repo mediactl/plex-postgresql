@@ -9,7 +9,7 @@ use crate::libpq_helpers::{rust_pg_align_idle_timeout_with_server, rust_pg_probe
 use super::pool_lookup::find_any_library_connection;
 use super::pool_runtime::{pool_check_health_inner, pool_release_for_db_inner};
 use super::{
-    close_handle_connection, conn_config, destroy_pool_connection, log_error,
+    close_handle_connection, conn_config, destroy_pool_connection, effective_pool_max, log_error,
     parse_positive_env_or_default, pool, pool_find_connection_for_db, pool_get_connection_inner,
     pool_get_connection_inner_excluding, CLIENT_INIT, POOL, POOL_SIZE_DEFAULT,
 };
@@ -206,22 +206,24 @@ pub extern "C" fn rust_pg_client_init() {
             }
         };
 
-        if db_max_connections > 0 {
-            if pool_max != db_max_connections {
-                log_info_lazy!(
-                    "Pool max ({}) does not match database max_connections ({}); adjusting to {}",
-                    pool_max,
-                    db_max_connections,
-                    db_max_connections
-                );
-                pool_max = db_max_connections;
-            }
-        } else {
+        // The server's max_connections is a ceiling shared by every pod, so
+        // it can only lower the operator's figure. Replacing it, as this once
+        // did, handed every pod the whole server.
+        let ceiling = effective_pool_max(pool_max, db_max_connections);
+        if db_max_connections <= 0 {
             log_info_lazy!(
                 "Pool init: could not read database max_connections; keeping pool max={}",
                 pool_max
             );
+        } else if ceiling != pool_max {
+            log_info_lazy!(
+                "Pool max ({}) exceeds database max_connections ({}); clamping to {}",
+                pool_max,
+                db_max_connections,
+                ceiling
+            );
         }
+        pool_max = ceiling;
 
         if pool_size > pool_max {
             log_info_lazy!(
