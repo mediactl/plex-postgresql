@@ -11,6 +11,46 @@ unsafe fn alloc_fake_pg_connection() -> *mut PgConnection {
 }
 
 #[test]
+fn destroying_a_pool_connection_retires_the_struct_rather_than_freeing_it() {
+    // PgStmt holds its connection as a raw *mut PgConnection and PgConnection
+    // has no reference count, so freeing the struct leaves every statement
+    // still pointing at it — and errmsg_impl hands Plex a pointer directly
+    // into conn.last_error. reap_idle freed it on a timer, which is why
+    // raising PLEX_PG_IDLE_TIMEOUT made the crashes stop: nothing was being
+    // freed any more.
+    //
+    // Retiring the struct instead keeps those pointers pointing at memory
+    // that is still mapped and says, truthfully, that the connection is not
+    // usable. Sixty-four places already check is_pg_active before touching a
+    // connection, so that is a state the code is built to handle; freed
+    // memory is not.
+    let conn = unsafe { alloc_fake_pg_connection() };
+    unsafe {
+        (*conn).is_pg_active = 1;
+    }
+
+    super::super::connection_lifecycle::destroy_pool_connection(conn as *mut c_void);
+
+    // Reading these at all is the point of the test: after a free it would be
+    // undefined, and under a real allocator it is exactly the read that was
+    // corrupting Plex.
+    assert_eq!(
+        unsafe { (*conn).is_pg_active },
+        0,
+        "a retired connection has to report itself unusable"
+    );
+    assert!(
+        unsafe { (*conn).conn.is_null() },
+        "the libpq handle is gone even though the struct remains"
+    );
+
+    // Idempotent: the reaper and an error path can both reach the same
+    // connection, and the second one must not do anything worse than nothing.
+    super::super::connection_lifecycle::destroy_pool_connection(conn as *mut c_void);
+    assert_eq!(unsafe { (*conn).is_pg_active }, 0);
+}
+
+#[test]
 fn pool_manager_creates_slots() {
     let pm = PoolManager::new(10, 64);
     assert_eq!(pm.pool_size(), 10);
