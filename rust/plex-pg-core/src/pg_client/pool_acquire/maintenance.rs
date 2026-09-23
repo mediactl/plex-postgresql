@@ -4,7 +4,6 @@ use crate::ffi_types::PgConnection;
 
 use super::super::connection_helpers::conn_is_streaming_active_ptr;
 use super::super::connection_lifecycle::destroy_pool_connection;
-use super::super::threading::check_thread_alive;
 use super::super::SLOT_READY;
 use super::shared::AcquireCtx;
 use crate::log_info_lazy;
@@ -18,35 +17,26 @@ pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
         if state != SLOT_READY {
             continue;
         }
+        // Referenced or recently used settles it; nothing asks whether the
+        // owner thread is still alive. Plex opens twenty database handles when
+        // it starts and keeps them for the life of the process while the
+        // worker threads that used them come and go, so a dead owner means
+        // nothing -- and asking musl about one segfaults, because its
+        // pthread_t is a pointer into a stack that is no longer mapped. See
+        // PoolManager::zombie_reclaimable.
         let last_used = slot.last_used.load(Ordering::Acquire);
-        if ctx.now - last_used <= idle_timeout {
-            continue;
-        }
-
-        // A handle still holding this slot settles it, whatever the idle time
-        // and whatever became of the thread that opened it.
-        //
-        // This check is the point of the reclaim, not an extra guard on it.
-        // Plex opens twenty database handles when it starts and keeps them
-        // for the life of the process, while the worker threads that used
-        // them come and go — so a slot idle for minutes with a dead owner
-        // thread is ordinary rather than abandoned. Reclaiming one handed a
-        // live PGconn to a second thread, and libpq is not thread-safe per
-        // connection: Plex corrupted its own heap and aborted mid-statement,
-        // leaving no crash dump and no segfault behind to explain it.
-        if ctx.pm.slot_is_referenced(i) {
-            continue;
-        }
-
-        let owner = slot.owner_thread.load(Ordering::Acquire);
-        if check_thread_alive(owner) {
+        if !super::super::PoolManager::zombie_reclaimable(
+            ctx.pm.slot_is_referenced(i),
+            ctx.now - last_used,
+            idle_timeout,
+        ) {
             continue;
         }
 
         let conn = slot.conn.load(Ordering::Acquire);
         if !conn.is_null() && conn_is_streaming_active_ptr(conn as *mut PgConnection) {
             log_info_lazy!(
-                "Pool PHASE 0: slot {} owner dead but streaming_active, skipping reclaim",
+                "Pool PHASE 0: slot {} unreferenced but streaming_active, skipping reclaim",
                 i
             );
             continue;
@@ -54,7 +44,7 @@ pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
 
         if slot.try_reclaim_zombie() {
             log_info_lazy!(
-                "Pool PHASE 0: Freed zombie slot {} (owner thread dead, idle {} sec)",
+                "Pool PHASE 0: Freed zombie slot {} (unreferenced, idle {} sec)",
                 i,
                 ctx.now - last_used
             );

@@ -112,3 +112,35 @@ fn reaper_critical_fix_tls_generation_mismatch() {
     // The connection pointer is gone
     assert!(pm.slots[2].conn.load(Ordering::Relaxed).is_null());
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Regression: reclaiming a slot must never ask whether its owner thread is
+// alive. `pthread_kill(owner, 0)` on an exited thread's pthread_t is a
+// segfault on musl, which is what Plex runs on; two core dumps put that frame
+// under the pool in sqlite3_prepare_v2 and sqlite3_step.
+// ═════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn an_unreferenced_slot_idle_past_the_timeout_is_reclaimable() {
+    assert!(PoolManager::zombie_reclaimable(false, 301, 300));
+}
+
+#[test]
+fn a_referenced_slot_is_never_reclaimable_however_idle() {
+    assert!(!PoolManager::zombie_reclaimable(true, 100_000, 300));
+}
+
+#[test]
+fn a_recently_used_slot_is_not_reclaimable() {
+    assert!(!PoolManager::zombie_reclaimable(false, 300, 300));
+    assert!(!PoolManager::zombie_reclaimable(false, 5, 300));
+}
+
+#[test]
+fn reclaim_decides_without_probing_the_owner_thread() {
+    // The decision takes no thread identity at all, so there is nothing to
+    // probe. If someone reintroduces a liveness check, this will not compile
+    // against it -- which is the point.
+    let decide: fn(bool, i64, i64) -> bool = PoolManager::zombie_reclaimable;
+    assert!(decide(false, 301, 300));
+}

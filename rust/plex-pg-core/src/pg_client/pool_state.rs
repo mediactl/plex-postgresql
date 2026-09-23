@@ -170,6 +170,27 @@ impl PoolManager {
         }
     }
 
+    /// Whether a READY slot may be taken back from a thread that has moved on.
+    ///
+    /// Two inputs, on purpose: whether any handle still references the slot,
+    /// and how long it has sat idle. There is deliberately no third input for
+    /// whether the owner thread is still alive. The pool used to probe that
+    /// with `pthread_kill(owner, 0)`, and on musl -- which is what Plex runs
+    /// on -- a `pthread_t` is a pointer to the thread's control block that
+    /// `pthread_kill` dereferences to lock. Once the owner has exited and its
+    /// stack is unmapped, that is a segmentation fault in whichever thread is
+    /// acquiring a connection at the time. Plex's request, webhook and pool
+    /// threads are exactly that short-lived, so every pod died within minutes
+    /// of its first playback, in `sqlite3_prepare_v2` or `sqlite3_step`, with
+    /// `pthread_kill` as the frame under the pool. Two core dumps, same stack.
+    ///
+    /// The probe was never sound anywhere -- thread ids are recycled, and a
+    /// live handle does not need a live thread behind it -- and the reference
+    /// count already says what the probe was guessing at.
+    pub fn zombie_reclaimable(referenced: bool, idle_secs: i64, idle_timeout_secs: i64) -> bool {
+        !referenced && idle_secs > idle_timeout_secs
+    }
+
     /// Whether any database handle still holds this slot.
     ///
     /// The pool's reference count, and the only sound basis for deciding a

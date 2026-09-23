@@ -37,13 +37,6 @@ pub(super) fn threads_equal(a: u64, b: u64) -> bool {
     unsafe { libc::pthread_equal(u64_to_pthread(a), u64_to_pthread(b)) != 0 }
 }
 
-pub(super) fn check_thread_alive(thread_id: u64) -> bool {
-    if thread_id == 0 {
-        return false;
-    }
-    unsafe { libc::pthread_kill(u64_to_pthread(thread_id), 0) == 0 }
-}
-
 pub(super) fn sleep_ms(ms: i32) {
     if ms <= 0 {
         return;
