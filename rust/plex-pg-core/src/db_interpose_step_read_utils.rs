@@ -96,6 +96,21 @@ pub extern "C" fn rust_step_read_log_debug_context(
 
 #[cfg(test)]
 mod tests {
+
+    /// A connection the reference counting can actually touch.
+    ///
+    /// These were sentinels like `0x1234 as *mut PgConnection`, which was fine
+    /// while nothing dereferenced them. Holding a connection now counts a
+    /// reference on it, so a test pointer has to be a real allocation. The
+    /// extra reference stands in for the pool slot and keeps the struct alive
+    /// for the length of the test.
+    fn fake_pool_conn() -> *mut PgConnection {
+        let c =
+            unsafe { libc::calloc(1, std::mem::size_of::<PgConnection>()) as *mut PgConnection };
+        assert!(!c.is_null());
+        crate::ffi_types::conn_ref(c);
+        c
+    }
     use super::{
         adopt_materialized_result_owner, rust_step_read_prepare_reexecution_state,
         should_clear_cross_thread_result, should_use_streaming,
@@ -115,11 +130,11 @@ mod tests {
     #[test]
     fn cross_thread_reexecution_only_clears_streaming_results() {
         let stmt_ptr = make_stmt();
-        let old_conn = 0x1234usize as *mut PgConnection;
-        let new_conn = 0x5678usize as *mut PgConnection;
+        let old_conn = fake_pool_conn();
+        let new_conn = fake_pool_conn();
 
         let s = unsafe { &mut *stmt_ptr };
-        s.result_conn = old_conn;
+        s.set_result_conn(old_conn);
         s.streaming_mode = 1;
 
         assert!(should_clear_cross_thread_result(stmt_ptr, new_conn));
@@ -131,12 +146,12 @@ mod tests {
     fn cross_thread_reexecution_keeps_materialized_eager_results() {
         let stmt_ptr = make_stmt();
         let result = 0x1234usize as *mut PGresult;
-        let old_conn = 0x2345usize as *mut PgConnection;
-        let new_conn = 0x3456usize as *mut PgConnection;
+        let old_conn = fake_pool_conn();
+        let new_conn = fake_pool_conn();
 
         let s = unsafe { &mut *stmt_ptr };
         s.result = result;
-        s.result_conn = old_conn;
+        s.set_result_conn(old_conn);
         s.streaming_mode = 0;
 
         assert!(!should_clear_cross_thread_result(stmt_ptr, new_conn));
@@ -144,9 +159,9 @@ mod tests {
 
         let s = unsafe { &mut *stmt_ptr };
         assert_eq!(s.result, result);
-        assert_eq!(s.result_conn, new_conn);
+        assert_eq!(s.result_conn(), new_conn);
         s.result = std::ptr::null_mut();
-        s.result_conn = std::ptr::null_mut();
+        s.set_result_conn(std::ptr::null_mut());
 
         rust_stmt_free(stmt_ptr);
     }
@@ -155,12 +170,12 @@ mod tests {
     fn prepare_reexecution_state_adopts_materialized_eager_result() {
         let stmt_ptr = make_stmt();
         let result = 0x1234usize as *mut PGresult;
-        let old_conn = 0x4567usize as *mut PgConnection;
-        let new_conn = 0x5678usize as *mut PgConnection;
+        let old_conn = fake_pool_conn();
+        let new_conn = fake_pool_conn();
 
         let s = unsafe { &mut *stmt_ptr };
         s.result = result;
-        s.result_conn = old_conn;
+        s.set_result_conn(old_conn);
         s.streaming_mode = 0;
         s.metadata_only_result = 0;
 
@@ -168,9 +183,9 @@ mod tests {
 
         let s = unsafe { &mut *stmt_ptr };
         assert_eq!(s.result, result);
-        assert_eq!(s.result_conn, new_conn);
+        assert_eq!(s.result_conn(), new_conn);
         s.result = std::ptr::null_mut();
-        s.result_conn = std::ptr::null_mut();
+        s.set_result_conn(std::ptr::null_mut());
 
         rust_stmt_free(stmt_ptr);
     }
@@ -178,13 +193,13 @@ mod tests {
     #[test]
     fn prepare_reexecution_state_marks_cross_thread_streaming_stmt_for_eager_requery() {
         let stmt_ptr = make_stmt();
-        let old_conn = 0x4567usize as *mut PgConnection;
-        let new_conn = 0x5678usize as *mut PgConnection;
+        let old_conn = fake_pool_conn();
+        let new_conn = fake_pool_conn();
 
         let s = unsafe { &mut *stmt_ptr };
         s.streaming_mode = 1;
-        s.streaming_conn = old_conn;
-        s.result_conn = old_conn;
+        s.set_streaming_conn(old_conn);
+        s.set_result_conn(old_conn);
         s.needs_requery = 0;
 
         rust_step_read_prepare_reexecution_state(stmt_ptr, new_conn);
@@ -192,8 +207,8 @@ mod tests {
         let s = unsafe { &*stmt_ptr };
         assert_eq!(s.needs_requery, 1);
         assert_eq!(s.streaming_mode, 0);
-        assert!(s.streaming_conn.is_null());
-        assert!(s.result_conn.is_null());
+        assert!(s.streaming_conn().is_null());
+        assert!(s.result_conn().is_null());
 
         rust_stmt_free(stmt_ptr);
     }

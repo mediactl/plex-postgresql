@@ -39,10 +39,10 @@ fn set_stmt_translation_error(pg_stmt: *mut PgStmt, msg: &str) {
             return;
         }
         let stmt = &mut *pg_stmt;
-        if stmt.conn.is_null() {
+        if stmt.conn().is_null() {
             return;
         }
-        let conn = &mut *stmt.conn;
+        let conn = &mut *stmt.conn();
         conn.last_error_code = SQLITE_ERROR;
         conn.last_error.fill(0);
         let bytes = msg.as_bytes();
@@ -453,7 +453,11 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
             b"[SQLITE_STEP_ERROR] rc=%d errmsg='%s' sql='%.900s'\n\0".as_ptr() as *const c_char,
             rc,
             errmsg,
-            if sql.is_null() { b"<null>\0".as_ptr() as *const c_char } else { sql },
+            if sql.is_null() {
+                b"<null>\0".as_ptr() as *const c_char
+            } else {
+                sql
+            },
         );
         libc::fflush(stderr_ptr());
     }

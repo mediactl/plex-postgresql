@@ -273,20 +273,30 @@ mod tests {
     fn metadata_result_state_assigns_result_owner() {
         let stmt = make_stmt();
         let result = 0x1234usize as *mut PgResultLibpq;
-        let exec_conn = 0x5678usize as *mut PgConnection;
+        // A real allocation rather than a sentinel: holding a connection now
+        // counts a reference on it, so the pointer has to be one that can be
+        // dereferenced.
+        let exec_conn =
+            unsafe { libc::calloc(1, std::mem::size_of::<PgConnection>()) as *mut PgConnection };
+        assert!(!exec_conn.is_null());
+        crate::ffi_types::conn_ref(exec_conn); // stand in for the pool slot
 
         unsafe {
             set_metadata_result_state(&mut *stmt, result, exec_conn, 0, 0);
         }
         let s = unsafe { &mut *stmt };
         assert_eq!(s.result, result);
-        assert_eq!(s.result_conn, exec_conn);
+        assert_eq!(s.result_conn(), exec_conn);
         assert_eq!(s.metadata_only_result, 1);
 
         s.result = std::ptr::null_mut();
-        s.result_conn = std::ptr::null_mut();
+        s.set_result_conn(std::ptr::null_mut());
 
         rust_stmt_free(stmt);
+        assert!(
+            crate::ffi_types::conn_unref(exec_conn),
+            "the statement gave its reference back, so this frees it"
+        );
     }
 
     extern "C" fn shadow_column_count_stub(_: *mut sqlite3_stmt) -> c_int {

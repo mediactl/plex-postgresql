@@ -9,7 +9,7 @@ pub fn rust_stmt_create(
     shadow_stmt: *mut sqlite3_stmt,
 ) -> *mut PgStmt {
     let mut stmt = PgStmt::new();
-    stmt.conn = conn;
+    stmt.set_conn(conn);
     stmt.shadow_stmt = shadow_stmt;
     stmt.sql = if sql.is_null() {
         std::ptr::null_mut()

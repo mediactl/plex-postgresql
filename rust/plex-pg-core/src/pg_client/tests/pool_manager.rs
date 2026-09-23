@@ -11,43 +11,126 @@ unsafe fn alloc_fake_pg_connection() -> *mut PgConnection {
 }
 
 #[test]
-fn destroying_a_pool_connection_retires_the_struct_rather_than_freeing_it() {
-    // PgStmt holds its connection as a raw *mut PgConnection and PgConnection
-    // has no reference count, so freeing the struct leaves every statement
-    // still pointing at it — and errmsg_impl hands Plex a pointer directly
-    // into conn.last_error. reap_idle freed it on a timer, which is why
-    // raising PLEX_PG_IDLE_TIMEOUT made the crashes stop: nothing was being
-    // freed any more.
+fn a_connection_is_freed_only_when_the_last_reference_lets_go() {
+    // PgStmt is reference counted; the connection it points at was not, so
+    // the pool freed connections out from under live statements. The count
+    // has one holder for the pool slot and one for every statement pointing
+    // at it, and the struct goes when the last of them lets go.
+    use crate::ffi_types::{conn_ref, conn_refs, conn_unref};
+
+    let conn = unsafe { alloc_fake_pg_connection() };
+    conn_ref(conn); // the pool slot
+    assert_eq!(conn_refs(conn), 1);
+
+    conn_ref(conn); // a statement takes it
+    conn_ref(conn); // and another
+    assert_eq!(conn_refs(conn), 3);
+
+    assert!(
+        !conn_unref(conn),
+        "the slot letting go is not the last reference"
+    );
+    assert!(!conn_unref(conn), "one statement still holds it");
+    assert_eq!(conn_refs(conn), 1);
+
+    assert!(
+        conn_unref(conn),
+        "the last statement letting go is what frees it"
+    );
+}
+
+#[test]
+fn a_statement_holds_a_reference_for_every_connection_pointer_it_keeps() {
+    // A statement can name three different connections at once: the one it
+    // was prepared on, the one its current result belongs to, and the one it
+    // has claimed for streaming. Each is a pointer the pool must not free
+    // underneath, so each is counted.
+    use crate::ffi_types::{conn_ref, conn_refs, PgStmt};
+
+    let conn = unsafe { alloc_fake_pg_connection() };
+    conn_ref(conn); // the pool slot
+
+    let mut stmt = PgStmt::new();
+    stmt.set_conn(conn);
+    stmt.set_result_conn(conn);
+    stmt.set_streaming_conn(conn);
+    assert_eq!(conn_refs(conn), 4, "the slot plus the statement's three");
+
+    // Pointing a slot at what it already holds must not double count, or the
+    // connection would never reach zero and never be freed.
+    stmt.set_result_conn(conn);
+    assert_eq!(conn_refs(conn), 4);
+
+    stmt.release_conns();
+    assert_eq!(
+        conn_refs(conn),
+        1,
+        "freeing a statement gives back every reference it held"
+    );
+}
+
+#[test]
+fn releasing_a_null_connection_is_harmless() {
+    // The three pointers a statement can hold are null far more often than
+    // not, and every release path would otherwise need to check first.
+    use crate::ffi_types::{conn_ref, conn_unref};
+    conn_ref(std::ptr::null_mut());
+    assert!(!conn_unref(std::ptr::null_mut()));
+}
+
+#[test]
+fn a_connection_a_statement_still_holds_survives_the_pool_letting_go() {
+    // The crash this whole change exists for: reap_idle closed a connection
+    // and freed the struct, while statements were still pointing at it — and
+    // errmsg_impl had handed Plex a pointer into conn.last_error.
     //
-    // Retiring the struct instead keeps those pointers pointing at memory
-    // that is still mapped and says, truthfully, that the connection is not
-    // usable. Sixty-four places already check is_pg_active before touching a
-    // connection, so that is a state the code is built to handle; freed
-    // memory is not.
+    // The pool letting go now only drops its own reference. The connection is
+    // closed and marked unusable, which the sixty-four is_pg_active checks
+    // are built to handle, and the struct stays until the statement lets go.
+    use crate::ffi_types::{conn_refs, PgStmt};
+
     let conn = unsafe { alloc_fake_pg_connection() };
     unsafe {
         (*conn).is_pg_active = 1;
     }
+    crate::ffi_types::conn_ref(conn); // the pool slot
+
+    let mut stmt = PgStmt::new();
+    stmt.set_conn(conn);
 
     super::super::connection_lifecycle::destroy_pool_connection(conn as *mut c_void);
 
-    // Reading these at all is the point of the test: after a free it would be
-    // undefined, and under a real allocator it is exactly the read that was
-    // corrupting Plex.
+    // Reading these at all is the point: before this change the struct had
+    // been freed by now, and this read is the one that corrupted Plex.
+    assert_eq!(conn_refs(conn), 1, "the statement still holds it");
     assert_eq!(
         unsafe { (*conn).is_pg_active },
         0,
-        "a retired connection has to report itself unusable"
+        "and it reports itself unusable"
     );
-    assert!(
-        unsafe { (*conn).conn.is_null() },
-        "the libpq handle is gone even though the struct remains"
-    );
+    assert!(unsafe { (*conn).conn.is_null() });
 
-    // Idempotent: the reaper and an error path can both reach the same
-    // connection, and the second one must not do anything worse than nothing.
-    super::super::connection_lifecycle::destroy_pool_connection(conn as *mut c_void);
-    assert_eq!(unsafe { (*conn).is_pg_active }, 0);
+    stmt.release_conns();
+}
+
+#[test]
+fn releasing_a_connection_twice_refuses_rather_than_freeing_it_twice() {
+    // Belt and braces for the counting itself. A double release is a
+    // book-keeping bug, but turning it into a double free would be the very
+    // corruption this is meant to prevent.
+    use crate::ffi_types::{conn_ref, conn_refs, conn_unref};
+
+    let conn = unsafe { alloc_fake_pg_connection() };
+    conn_ref(conn);
+    assert!(conn_unref(conn), "the only holder letting go frees it");
+
+    // The struct is gone, so use a fresh one to prove the guard.
+    let other = unsafe { alloc_fake_pg_connection() };
+    assert!(
+        !conn_unref(other),
+        "nobody held it, so it must not be freed"
+    );
+    assert_eq!(conn_refs(other), 0, "and the count is left where it was");
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::{log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
-use crate::ffi_types::{sqlite3, PgConnection};
+use crate::ffi_types::{conn_ref, conn_unref, sqlite3, PgConnection};
 use crate::libpq_helpers::{
     rust_pq_connectdb, rust_pq_error_message, rust_pq_finish, rust_pq_reset, rust_pq_status,
     rust_pq_transaction_status, PGconn,
@@ -57,6 +57,10 @@ pub(super) fn create_connection_struct(
             log_error("Failed to allocate pg_connection_t");
             return std::ptr::null_mut();
         }
+        // The reference the pool itself holds. calloc zeroed the count, so
+        // without this the first statement to let go would free a connection
+        // the pool still has in a slot.
+        conn_ref(conn_ptr);
         // Use PTHREAD_MUTEX_RECURSIVE to match PgStmt.mutex and prevent
         // self-deadlock when ensure_pg_result_for_metadata calls
         // resolve_column_tables_impl on the same connection.
@@ -81,15 +85,14 @@ pub(super) fn create_connection_struct(
     }
 }
 
+/// Free a connection struct that was never published.
+///
+/// Only for the failure paths in `create_pool_connection`, where the struct
+/// has just been allocated and no slot or statement has seen it. Anything
+/// that has been handed out goes through `destroy_pool_connection` instead,
+/// which drops a reference rather than freeing outright.
 pub(super) fn destroy_connection_struct(conn: *mut PgConnection) {
-    if conn.is_null() {
-        return;
-    }
-    unsafe {
-        let c = &mut *conn;
-        libc::pthread_mutex_destroy(&mut c.mutex as *mut _);
-        libc::free(conn as *mut libc::c_void);
-    }
+    conn_unref(conn);
 }
 
 pub(super) fn create_pool_connection(db_path: *const c_char) -> *mut c_void {
@@ -158,30 +161,21 @@ pub(super) fn create_pool_connection(db_path: *const c_char) -> *mut c_void {
     conn_ptr as *mut c_void
 }
 
-/// Retire a pooled connection: close it, and leave the struct behind.
+/// Close a pooled connection and let go of the pool's reference to it.
 ///
-/// The struct is deliberately not freed. PgStmt holds its connection as a raw
-/// `*mut PgConnection` and PgConnection has no reference count, so freeing it
-/// leaves every statement still pointing at it — and `errmsg_impl` hands Plex
-/// a pointer directly into `conn.last_error`. `reap_idle` did this on a timer,
-/// which is why raising PLEX_PG_IDLE_TIMEOUT made Plex stop dying: nothing was
-/// being freed any more.
+/// The struct outlives this call whenever a statement still points at it.
+/// PgStmt holds its connection as a raw `*mut PgConnection`, and freeing the
+/// struct regardless is what killed Plex: every statement was left pointing
+/// into freed memory, and `errmsg_impl` hands Plex a pointer straight into
+/// `conn.last_error`. `reap_idle` did it on a timer, gated by
+/// PLEX_PG_IDLE_TIMEOUT, which is why raising that timeout stopped the
+/// crashes — nothing was being reaped, so nothing was being freed.
 ///
-/// A retired struct stays mapped and says, truthfully, that the connection is
+/// The connection is closed and marked inactive either way, so a statement
+/// that still holds it finds a connection which says, truthfully, that it is
 /// not usable. Sixty-four places already check `is_pg_active` before touching
-/// a connection, so that is a state the code is built to handle; freed memory
-/// is not.
-///
-/// It is never handed out again either. Reusing it for the next connection
-/// would put a live connection behind a pointer some statement still believes
-/// is its own, which trades a use-after-free for a statement quietly running
-/// against the wrong connection.
-///
-/// The cost is the struct itself, a little over a kilobyte, for each
-/// connection the pool retires. That is a slow leak rather than a bounded one,
-/// and it is the reason this is a floor rather than the final answer: the
-/// proper fix is to reference-count PgConnection the way PgStmt already is,
-/// and free it when the last statement lets go.
+/// one; none of them can check for freed memory. The struct itself goes when
+/// the last statement lets go.
 pub(super) fn destroy_pool_connection(conn: *mut c_void) {
     let conn_ptr = conn as *mut PgConnection;
     if conn_ptr.is_null() {
@@ -189,17 +183,20 @@ pub(super) fn destroy_pool_connection(conn: *mut c_void) {
     }
     pool().forget_live_pool_connection(conn_ptr as *const c_void);
     rust_stmt_cache_drop(conn_ptr as *mut c_void);
-    // SAFETY: conn_ptr is non-null after the check above, and stays valid
-    // precisely because this function no longer frees it.
+    // SAFETY: conn_ptr is non-null, and the pool's own reference is still
+    // held until the unref below, so the struct cannot go away underneath us.
     let conn = unsafe { &mut *conn_ptr };
     if !conn.conn.is_null() {
         rust_pq_finish(conn.conn);
         conn.conn = std::ptr::null_mut();
     }
-    // Both orderings matter to a reader that is already inside this struct:
-    // the handle is gone first, then the flag that tells everyone so.
+    // Ordering matters to a statement that is already inside this struct: the
+    // handle goes first, then the flag that tells everyone it has gone.
     conn.is_pg_active = 0;
     conn.streaming_active.store(0, Ordering::Release);
+
+    // The pool's reference. Whoever holds the last one does the freeing.
+    conn_unref(conn_ptr);
 }
 
 pub(super) fn check_conn_ok(conn: *mut c_void) -> bool {

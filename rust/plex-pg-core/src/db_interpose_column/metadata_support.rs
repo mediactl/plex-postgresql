@@ -40,7 +40,7 @@ pub(crate) unsafe fn set_metadata_result_state(
     pg_stmt.result = result;
     pg_stmt.num_rows = num_rows;
     pg_stmt.current_row = current_row;
-    pg_stmt.result_conn = exec_conn;
+    pg_stmt.set_result_conn(exec_conn);
     pg_stmt.metadata_only_result = 1;
 }
 
@@ -58,13 +58,13 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
         return true;
     }
     if pg_stmt_ref.pg_sql.is_null()
-        || pg_stmt_ref.conn.is_null()
-        || unsafe { (*pg_stmt_ref.conn).conn.is_null() }
+        || pg_stmt_ref.conn().is_null()
+        || unsafe { (*pg_stmt_ref.conn()).conn.is_null() }
     {
         return false;
     }
 
-    let conn = pg_stmt_ref.conn;
+    let conn = pg_stmt_ref.conn();
     let conn_ref = unsafe { &*conn };
     let is_library =
         crate::db_interpose_helpers::rust_is_library_db_path(conn_ref.db_path.as_ptr());

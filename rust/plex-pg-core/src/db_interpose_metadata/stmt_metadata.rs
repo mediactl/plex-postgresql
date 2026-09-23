@@ -42,9 +42,9 @@ pub(super) fn db_handle_impl(p_stmt: *mut sqlite3_stmt) -> *mut sqlite3 {
             }
         }
         unsafe {
-            if !s.conn.is_null() && !(*s.conn).shadow_db.is_null() {
-                log_debug_lazy!("DB_HANDLE: returning shadow_db={:p}", (*s.conn).shadow_db);
-                return (*s.conn).shadow_db;
+            if !s.conn().is_null() && !(*s.conn()).shadow_db.is_null() {
+                log_debug_lazy!("DB_HANDLE: returning shadow_db={:p}", (*s.conn()).shadow_db);
+                return (*s.conn()).shadow_db;
             }
         }
         log_debug("DB_HANDLE: pg_stmt has no valid db handle");

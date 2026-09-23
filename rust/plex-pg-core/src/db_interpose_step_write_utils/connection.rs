@@ -144,7 +144,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
             }
         }
 
-        stmt.conn = exec_conn;
+        stmt.set_conn(exec_conn);
 
         // Rebind after possible reassignment of exec_conn
         let ec = &mut *exec_conn;

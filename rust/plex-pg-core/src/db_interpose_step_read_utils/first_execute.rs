@@ -48,7 +48,7 @@ pub(super) fn first_execute_impl(
                 Err(rc) => return rc,
             };
 
-        (&mut *pg_stmt).conn = exec_conn;
+        (&mut *pg_stmt).set_conn(exec_conn);
         if let Err(rc) = ensure_connection_ready(
             pg_stmt,
             exec_conn,

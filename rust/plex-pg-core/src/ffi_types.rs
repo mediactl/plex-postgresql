@@ -1,5 +1,5 @@
 use std::os::raw::{c_char, c_int, c_void};
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::libpq_helpers::{PGconn, PGresult};
 use crate::pg_query_cache::CachedResult;
@@ -42,6 +42,82 @@ pub struct PgConnection {
     pub last_error: [c_char; LAST_ERROR_LEN],
     pub last_error_code: c_int,
     pub streaming_active: AtomicI32,
+    /// How many holders still point at this struct.
+    ///
+    /// PgStmt has always been reference counted; the connection it points at
+    /// was not, so the pool was free to `libc::free` a struct that live
+    /// statements still held — and that `errmsg_impl` had handed Plex a
+    /// pointer into. One holder is the pool slot, and one is every statement
+    /// pointer that names this connection.
+    ///
+    /// Last on the struct on purpose: `repr(C)` is vestigial here — nothing
+    /// in C reads this type any more, and the legacy header has already
+    /// drifted — but appending rather than inserting keeps that true for
+    /// anything that reads the older fields by offset.
+    pub ref_count: AtomicI32,
+}
+
+/// Take a reference to a pooled connection. Null is ignored, because the
+/// pointers a statement holds are null more often than not.
+pub fn conn_ref(conn: *mut PgConnection) {
+    if conn.is_null() {
+        return;
+    }
+    // SAFETY: non-null, and the caller holds a reference of its own or is the
+    // pool creating this connection.
+    unsafe { &*conn }.ref_count.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Drop a reference, freeing the struct when the last holder lets go.
+///
+/// Returns whether this call did the freeing, which is what the tests assert
+/// on: freed memory cannot be examined afterwards.
+pub fn conn_unref(conn: *mut PgConnection) -> bool {
+    if conn.is_null() {
+        return false;
+    }
+    // SAFETY: non-null, and the caller holds the reference it is dropping.
+    let previous = unsafe { &*conn }.ref_count.fetch_sub(1, Ordering::AcqRel);
+    if previous > 1 {
+        return false;
+    }
+    if previous < 1 {
+        // Nobody held this, so something released it twice. Freeing now would
+        // turn a book-keeping bug into the double free this counting exists
+        // to prevent, so put the count back and leave the struct alone. A
+        // leaked connection is survivable; a double free is not.
+        unsafe { &*conn }.ref_count.fetch_add(1, Ordering::AcqRel);
+        return false;
+    }
+    // SAFETY: the count reached zero, so nothing else points here any more.
+    unsafe {
+        libc::pthread_mutex_destroy(&mut (*conn).mutex as *mut _);
+        libc::free(conn as *mut libc::c_void);
+    }
+    true
+}
+
+/// Swap one held connection pointer for another, counting both.
+///
+/// The new reference is taken before the old one is dropped, so replacing a
+/// pointer with itself cannot briefly reach zero and free the struct the
+/// caller is still using.
+fn replace_conn(old: *mut PgConnection, new: *mut PgConnection) -> *mut PgConnection {
+    if old == new {
+        return new;
+    }
+    conn_ref(new);
+    conn_unref(old);
+    new
+}
+
+/// How many holders a connection has. For tests and for logging.
+pub fn conn_refs(conn: *const PgConnection) -> i32 {
+    if conn.is_null() {
+        return 0;
+    }
+    // SAFETY: non-null, and the caller holds a reference.
+    unsafe { &*conn }.ref_count.load(Ordering::Acquire)
 }
 
 // PgStmt is no longer repr(C) — all access is from Rust.
@@ -51,7 +127,7 @@ pub struct PgConnection {
 pub struct PgStmt {
     pub mutex: std::sync::Mutex<()>,
     pub ref_count: AtomicI32,
-    pub conn: *mut PgConnection,
+    conn: *mut PgConnection,
     pub shadow_stmt: *mut sqlite3_stmt,
     pub sql: *mut c_char,
     pub pg_sql: *mut c_char,
@@ -72,11 +148,11 @@ pub struct PgStmt {
     pub metadata_only_result: c_int,
     pub in_step: AtomicI32,
     pub executing_thread: libc::pthread_t,
-    pub result_conn: *mut PgConnection,
+    result_conn: *mut PgConnection,
     pub col_names: *mut *mut c_char,
     pub num_col_names: c_int,
     pub streaming_mode: c_int,
-    pub streaming_conn: *mut PgConnection,
+    streaming_conn: *mut PgConnection,
     // Parameter arrays — sized to param_count via ensure_param_capacity()
     pub param_values: Vec<*mut c_char>,
     pub param_lengths: Vec<c_int>,
@@ -150,6 +226,50 @@ impl PgStmt {
             col_table_names: Vec::new(),
             col_tables_resolved: 0,
         }
+    }
+
+    /// The connection this statement was prepared on.
+    pub fn conn(&self) -> *mut PgConnection {
+        self.conn
+    }
+
+    /// The connection the current result belongs to, which need not be the one
+    /// the statement was prepared on.
+    pub fn result_conn(&self) -> *mut PgConnection {
+        self.result_conn
+    }
+
+    /// The connection claimed for streaming, which must be drained before it
+    /// goes back to the pool.
+    pub fn streaming_conn(&self) -> *mut PgConnection {
+        self.streaming_conn
+    }
+
+    /// Point this statement at a connection, taking a reference to it and
+    /// letting go of the one it held.
+    ///
+    /// These three pointers are private, and reached only through here, so
+    /// that no assignment can quietly skip the counting. That is the whole
+    /// mechanism: the compiler enumerates the call sites rather than a grep,
+    /// and a missed one is a build error instead of either a leak or a
+    /// connection freed under a live statement.
+    pub fn set_conn(&mut self, conn: *mut PgConnection) {
+        self.conn = replace_conn(self.conn, conn);
+    }
+
+    pub fn set_result_conn(&mut self, conn: *mut PgConnection) {
+        self.result_conn = replace_conn(self.result_conn, conn);
+    }
+
+    pub fn set_streaming_conn(&mut self, conn: *mut PgConnection) {
+        self.streaming_conn = replace_conn(self.streaming_conn, conn);
+    }
+
+    /// Let go of all three, for when the statement itself is going away.
+    pub fn release_conns(&mut self) {
+        self.set_conn(std::ptr::null_mut());
+        self.set_result_conn(std::ptr::null_mut());
+        self.set_streaming_conn(std::ptr::null_mut());
     }
 
     /// Ensure param arrays are sized to at least `count` elements.

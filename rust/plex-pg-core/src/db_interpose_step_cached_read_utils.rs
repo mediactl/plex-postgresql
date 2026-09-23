@@ -255,7 +255,7 @@ pub extern "C" fn rust_step_cached_read_execute(
             s.num_cols = crate::libpq_helpers::rust_pq_nfields(s.result);
             s.ensure_column_capacity(s.num_cols as usize);
             s.current_row = 0;
-            s.result_conn = conn;
+            s.set_result_conn(conn);
 
             if resolve_column_tables(stmt, conn) < 0 {
                 log_error("Failed to resolve column tables, cleaning up");

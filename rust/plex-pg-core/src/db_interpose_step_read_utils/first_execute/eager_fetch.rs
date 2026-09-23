@@ -28,7 +28,7 @@ pub(super) unsafe fn eager_fetch_result(
         s.num_cols = crate::libpq_helpers::rust_pq_nfields(s.result);
         s.ensure_column_capacity(s.num_cols as usize);
         s.current_row = 0;
-        s.result_conn = exec_conn;
+        s.set_result_conn(exec_conn);
         s.metadata_only_result = 0;
         resolve_column_tables(pg_stmt, exec_conn);
         trace_play_queue_result(pg_stmt, s.result, "EAGER");

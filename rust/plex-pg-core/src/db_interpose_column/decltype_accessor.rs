@@ -28,7 +28,7 @@ unsafe fn lookup_cached_decltype(
     idx: c_int,
     col_name: *const c_char,
 ) -> *const c_char {
-    let mut cached_type = lookup_sqlite_decltype(pg_stmt.conn, col_name);
+    let mut cached_type = lookup_sqlite_decltype(pg_stmt.conn(), col_name);
 
     if cached_type.is_null() && idx >= 0 && (idx as usize) < pg_stmt.col_table_names.len() {
         let table_ptr = pg_stmt.col_table_names[idx as usize];
@@ -39,7 +39,7 @@ unsafe fn lookup_cached_decltype(
             cache_key.push_str(&table);
             cache_key.push('_');
             cache_key.push_str(&column);
-            cached_type = lookup_decltype_direct(pg_stmt.conn, &cache_key);
+            cached_type = lookup_decltype_direct(pg_stmt.conn(), &cache_key);
         }
     }
 
@@ -108,8 +108,10 @@ pub(super) fn column_decltype_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *co
         return result;
     }
 
-    let col_name =
-        crate::db_interpose_helpers::rust_pg_result_col_name(helpers_result_ptr(pg_stmt.result), idx);
+    let col_name = crate::db_interpose_helpers::rust_pg_result_col_name(
+        helpers_result_ptr(pg_stmt.result),
+        idx,
+    );
 
     let cached_type = unsafe { lookup_cached_decltype(pg_stmt, idx, col_name) };
     if !cached_type.is_null() {

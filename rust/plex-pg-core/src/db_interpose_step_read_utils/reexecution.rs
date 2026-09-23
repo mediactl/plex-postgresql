@@ -9,7 +9,7 @@ pub(crate) fn should_clear_cross_thread_result(
         return false;
     }
     let stmt = unsafe { &*stmt };
-    if stmt.result_conn == exec_conn {
+    if stmt.result_conn() == exec_conn {
         return false;
     }
     stmt.streaming_mode != 0
@@ -45,11 +45,11 @@ pub(crate) unsafe fn adopt_materialized_result_owner(
         return false;
     }
     let stmt = &mut *stmt;
-    if stmt.result.is_null() || stmt.streaming_mode != 0 || stmt.result_conn == exec_conn {
+    if stmt.result.is_null() || stmt.streaming_mode != 0 || stmt.result_conn() == exec_conn {
         return false;
     }
 
-    stmt.result_conn = exec_conn;
+    stmt.set_result_conn(exec_conn);
     stmt.executing_thread = libc::pthread_self();
     true
 }
@@ -68,14 +68,14 @@ pub extern "C" fn rust_step_read_prepare_reexecution_state(
         stmt_ref.needs_requery = 1;
         log_debug_lazy!(
             "STEP: Streaming stmt crossed threads; forcing eager requery (result_conn={:p} exec_conn={:p})",
-            stmt_ref.result_conn,
+            stmt_ref.result_conn(),
             exec_conn
         );
         crate::pg_statement::rust_stmt_clear_result(stmt);
     } else if unsafe { adopt_materialized_result_owner(stmt, exec_conn) } {
         log_debug_lazy!(
             "STEP: Reusing materialized eager result across threads (result_conn={:p} exec_conn={:p})",
-            stmt_ref.result_conn,
+            stmt_ref.result_conn(),
             exec_conn
         );
     }

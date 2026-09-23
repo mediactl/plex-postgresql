@@ -14,23 +14,23 @@ extern "C" {
 const PMT_STMT_SWEEP_EXTRA_FREE: i32 = 6;
 
 unsafe fn clear_streaming_state(stmt_ptr: *mut PgStmt, stmt: &mut PgStmt, op_name: &str) {
-    if stmt.streaming_mode == 0 || stmt.streaming_conn.is_null() {
+    if stmt.streaming_mode == 0 || stmt.streaming_conn().is_null() {
         return;
     }
 
-    if pg_pool_validate_connection(stmt.streaming_conn) == 0 {
+    if pg_pool_validate_connection(stmt.streaming_conn()) == 0 {
         log_error(&format!(
             "{}: streaming_conn invalid, skipping cancel/drain (stmt={:p})",
             op_name, stmt_ptr
         ));
         stmt.streaming_mode = 0;
-        stmt.streaming_conn = std::ptr::null_mut();
+        stmt.set_streaming_conn(std::ptr::null_mut());
         return;
     }
 
     // SAFETY: streaming_conn is non-null (checked above) and validated by
     // pg_pool_validate_connection.
-    let sconn = &mut *stmt.streaming_conn;
+    let sconn = &mut *stmt.streaming_conn();
     let _conn_guard = PthreadMutexGuard::lock(&mut sconn.mutex as *mut _);
     if !sconn.conn.is_null() {
         let cancel = crate::libpq_helpers::rust_pq_get_cancel(sconn.conn);
@@ -59,7 +59,7 @@ unsafe fn clear_streaming_state(stmt_ptr: *mut PgStmt, stmt: &mut PgStmt, op_nam
                 log_info_lazy!(
                     "{}: drain after cancel exceeded 1000 on {:p}",
                     op_name,
-                    stmt.streaming_conn
+                    stmt.streaming_conn()
                 );
                 break;
             }
@@ -85,7 +85,7 @@ unsafe fn clear_streaming_state(stmt_ptr: *mut PgStmt, stmt: &mut PgStmt, op_nam
 
     stmt.streaming_mode = 0;
     sconn.streaming_active.store(0, Ordering::Release);
-    stmt.streaming_conn = std::ptr::null_mut();
+    stmt.set_streaming_conn(std::ptr::null_mut());
 }
 
 unsafe fn safe_param_count(stmt: &PgStmt) -> usize {
@@ -276,6 +276,11 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             "pg_stmt_free: destroying mutex and freeing stmt={:p}",
             stmt_ptr
         );
+        // Give back the references this statement held. It is the last holder
+        // of a retired connection more often than not — the pool closed it
+        // while this statement still pointed at it — so this is usually what
+        // finally frees the connection struct.
+        stmt.release_conns();
         // std::sync::Mutex is cleaned up automatically by drop(Box::from_raw) below.
         drop(Box::from_raw(stmt_ptr));
         log_debug("pg_stmt_free: DONE");
@@ -299,7 +304,7 @@ pub fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
             crate::pg_query_cache::rust_query_cache_release(stmt.cached_result);
             stmt.cached_result = std::ptr::null_mut();
         }
-        stmt.result_conn = std::ptr::null_mut();
+        stmt.set_result_conn(std::ptr::null_mut());
         stmt.metadata_only_result = 0;
         stmt.current_row = -1;
         stmt.num_rows = 0;

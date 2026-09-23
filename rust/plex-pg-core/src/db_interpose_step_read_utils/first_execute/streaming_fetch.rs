@@ -3,11 +3,11 @@ use crate::log_debug_lazy;
 
 unsafe fn clear_streaming_state(s: &mut PgStmt) {
     s.streaming_mode = 0;
-    if !s.streaming_conn.is_null() {
-        let sc = &*s.streaming_conn;
+    if !s.streaming_conn().is_null() {
+        let sc = &*s.streaming_conn();
         sc.streaming_active.store(0, Ordering::SeqCst);
     }
-    s.streaming_conn = std::ptr::null_mut();
+    s.set_streaming_conn(std::ptr::null_mut());
 }
 
 unsafe fn finish_streaming_done(
@@ -33,8 +33,8 @@ pub(super) unsafe fn streaming_fetch_result(
     let s = &mut *pg_stmt;
     let ec = &mut *exec_conn;
     s.streaming_mode = 1;
-    s.streaming_conn = exec_conn;
-    s.result_conn = exec_conn;
+    s.set_streaming_conn(exec_conn);
+    s.set_result_conn(exec_conn);
     ec.streaming_active.store(1, Ordering::SeqCst);
     s.metadata_only_result = 0;
     conn_guard.unlock();
