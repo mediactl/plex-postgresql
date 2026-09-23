@@ -241,8 +241,7 @@ pub(super) static mut worker_mutex: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_
 /// `rust_delegate_prepare_to_worker` cannot spawn two workers for the one
 /// global `worker_request` slot. Always taken *before* `worker_mutex`, never
 /// while holding it.
-pub(super) static mut WORKER_INIT_MUTEX: libc::pthread_mutex_t =
-    libc::PTHREAD_MUTEX_INITIALIZER;
+pub(super) static mut WORKER_INIT_MUTEX: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_INITIALIZER;
 /// Gives one delegation at a time exclusive use of `worker_request`.
 ///
 /// `worker_mutex` alone cannot: the caller releases it inside
@@ -254,8 +253,7 @@ pub(super) static mut WORKER_INIT_MUTEX: libc::pthread_mutex_t =
 /// Taken *outside* `WORKER_INIT_MUTEX` and `worker_mutex`, never within
 /// either. The worker thread itself never takes it, and cannot: delegation is
 /// guarded by `from_worker == 0`, so the worker never re-enters this path.
-pub(super) static mut WORKER_CALL_MUTEX: libc::pthread_mutex_t =
-    libc::PTHREAD_MUTEX_INITIALIZER;
+pub(super) static mut WORKER_CALL_MUTEX: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_INITIALIZER;
 #[no_mangle]
 pub(super) static mut worker_cond_request: libc::pthread_cond_t = libc::PTHREAD_COND_INITIALIZER;
 #[no_mangle]

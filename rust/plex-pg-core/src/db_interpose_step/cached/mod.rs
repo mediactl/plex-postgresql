@@ -24,7 +24,8 @@ pub(super) unsafe fn step_handle_cached_stmt(p_stmt: *mut sqlite3_stmt) -> c_int
             .as_ref()
             .map(|f| {
                 let bytes = f.as_bytes();
-                bytes.windows(b"com.plexapp.plugins.library".len())
+                bytes
+                    .windows(b"com.plexapp.plugins.library".len())
                     .any(|w| w == b"com.plexapp.plugins.library")
             })
             .unwrap_or(false);

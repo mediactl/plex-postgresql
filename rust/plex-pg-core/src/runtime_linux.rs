@@ -112,7 +112,9 @@ unsafe fn resolve_interposition_hooks() {
     if !sym.is_null() {
         ptr::write(
             ptr::addr_of_mut!(ORIG_CREATE_SIMPLE_CONVERTER),
-            Some(std::mem::transmute::<*mut c_void, CreateSimpleConverterFn>(sym)),
+            Some(std::mem::transmute::<*mut c_void, CreateSimpleConverterFn>(
+                sym,
+            )),
         );
     }
 
@@ -123,16 +125,23 @@ unsafe fn resolve_interposition_hooks() {
         b"_ZN5boost6locale4util21create_simple_codecvtERKNSt3__26localeERKNS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS0_12char_facet_tE\0".as_ptr() as *const c_char
     );
     if !sym.is_null() {
-        ptr::write(ptr::addr_of_mut!(SHIM_CREATE_SIMPLE_CODECVT_PTR), sym as usize);
+        ptr::write(
+            ptr::addr_of_mut!(SHIM_CREATE_SIMPLE_CODECVT_PTR),
+            sym as usize,
+        );
     }
 
     // create_utf8_codecvt — ASCII redirect target for the asm hook.
     let sym = libc::dlsym(
         libc::RTLD_NEXT,
-        b"_ZN5boost6locale4util19create_utf8_codecvtERKNSt3__26localeENS0_12char_facet_tE\0".as_ptr() as *const c_char
+        b"_ZN5boost6locale4util19create_utf8_codecvtERKNSt3__26localeENS0_12char_facet_tE\0"
+            .as_ptr() as *const c_char,
     );
     if !sym.is_null() {
-        ptr::write(ptr::addr_of_mut!(SHIM_CREATE_UTF8_CODECVT_PTR), sym as usize);
+        ptr::write(
+            ptr::addr_of_mut!(SHIM_CREATE_UTF8_CODECVT_PTR),
+            sym as usize,
+        );
     }
 
     // create_simple_converter — pass-through target for the x86-64 hook.
@@ -141,16 +150,22 @@ unsafe fn resolve_interposition_hooks() {
         b"_ZN5boost6locale4util23create_simple_converterERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE\0".as_ptr() as *const c_char
     );
     if !sym.is_null() {
-        ptr::write(ptr::addr_of_mut!(SHIM_CREATE_SIMPLE_CONVERTER_PTR), sym as usize);
+        ptr::write(
+            ptr::addr_of_mut!(SHIM_CREATE_SIMPLE_CONVERTER_PTR),
+            sym as usize,
+        );
     }
 
     // create_utf8_converter — ASCII redirect target for the x86-64 hook.
     let sym = libc::dlsym(
         libc::RTLD_NEXT,
-        b"_ZN5boost6locale4util21create_utf8_converterEv\0".as_ptr() as *const c_char
+        b"_ZN5boost6locale4util21create_utf8_converterEv\0".as_ptr() as *const c_char,
     );
     if !sym.is_null() {
-        ptr::write(ptr::addr_of_mut!(SHIM_CREATE_UTF8_CONVERTER_PTR), sym as usize);
+        ptr::write(
+            ptr::addr_of_mut!(SHIM_CREATE_UTF8_CONVERTER_PTR),
+            sym as usize,
+        );
     }
 }
 

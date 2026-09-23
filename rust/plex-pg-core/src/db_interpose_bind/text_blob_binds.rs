@@ -9,7 +9,7 @@ fn parse_machine_identifier(content: &str) -> Option<String> {
     if let Some(pos) = content.find("MachineIdentifier=\"") {
         let start = pos + "MachineIdentifier=\"".len();
         if let Some(end) = content[start..].find("\"") {
-            let hex = &content[start..start+end];
+            let hex = &content[start..start + end];
             if hex.len() == 32 {
                 return Some(format!(
                     "{}-{}-{}-{}-{}",
@@ -121,8 +121,14 @@ pub(super) fn bind_text_impl(
 
     if !pg_stmt.is_null() && !val.is_null() {
         let stmt = unsafe { &*pg_stmt };
-        let sql_bytes = unsafe { if !stmt.sql.is_null() { crate::byte_utils::cstr_bytes(stmt.sql) } else { b"" } };
-        
+        let sql_bytes = unsafe {
+            if !stmt.sql.is_null() {
+                crate::byte_utils::cstr_bytes(stmt.sql)
+            } else {
+                b""
+            }
+        };
+
         let bypass = std::env::var("BYPASS_UUID_INTERCEPT").is_ok();
         if !bypass && crate::byte_utils::contains_bytes(sql_bytes, b"devices") {
             let actual_len = if n_bytes < 0 {
@@ -131,18 +137,27 @@ pub(super) fn bind_text_impl(
                 n_bytes as usize
             };
             if actual_len == 0 {
-                let param_name = crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, idx);
+                let param_name =
+                    crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, idx);
                 let is_identifier = if !param_name.is_null() {
-                    let name_str = unsafe { std::ffi::CStr::from_ptr(param_name).to_string_lossy().to_lowercase() };
+                    let name_str = unsafe {
+                        std::ffi::CStr::from_ptr(param_name)
+                            .to_string_lossy()
+                            .to_lowercase()
+                    };
                     name_str.contains("identifier")
                 } else {
-                    let sql_str = crate::db_interpose_conn_utils::cstr_to_string_or(stmt.sql, "").to_lowercase();
+                    let sql_str = crate::db_interpose_conn_utils::cstr_to_string_or(stmt.sql, "")
+                        .to_lowercase();
                     sql_str.contains("where identifier") || (sql_str.contains("select") && idx == 1)
                 };
 
                 if is_identifier {
                     _intercepted_uuid = get_machine_identifier();
-                    log_debug_lazy!("INTERCEPTED empty UUID bind on devices, replacing with {}", _intercepted_uuid);
+                    log_debug_lazy!(
+                        "INTERCEPTED empty UUID bind on devices, replacing with {}",
+                        _intercepted_uuid
+                    );
                     val = _intercepted_uuid.as_ptr() as *const c_char;
                     n_bytes = _intercepted_uuid.len() as c_int;
                 }
@@ -152,15 +167,27 @@ pub(super) fn bind_text_impl(
 
     if !pg_stmt.is_null() {
         let stmt = unsafe { &*pg_stmt };
-        let sql_bytes = unsafe { if !stmt.sql.is_null() { crate::byte_utils::cstr_bytes(stmt.sql) } else { b"" } };
-        if crate::byte_utils::contains_bytes(sql_bytes, b"devices") || crate::byte_utils::contains_bytes(sql_bytes, b"library_sections") || crate::byte_utils::contains_bytes(sql_bytes, b"plugins") {
-            let val_str = if val.is_null() { "NULL".to_string() } else {
+        let sql_bytes = unsafe {
+            if !stmt.sql.is_null() {
+                crate::byte_utils::cstr_bytes(stmt.sql)
+            } else {
+                b""
+            }
+        };
+        if crate::byte_utils::contains_bytes(sql_bytes, b"devices")
+            || crate::byte_utils::contains_bytes(sql_bytes, b"library_sections")
+            || crate::byte_utils::contains_bytes(sql_bytes, b"plugins")
+        {
+            let val_str = if val.is_null() {
+                "NULL".to_string()
+            } else {
                 let actual_len = if n_bytes < 0 {
                     unsafe { libc::strlen(val) as usize }
                 } else {
                     n_bytes as usize
                 };
-                let bytes = unsafe { std::slice::from_raw_parts(val as *const u8, actual_len.min(100)) };
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(val as *const u8, actual_len.min(100)) };
                 String::from_utf8_lossy(bytes).into_owned()
             };
             log_debug_lazy!(
@@ -314,8 +341,14 @@ pub(super) fn bind_text64_impl(
 
     if !pg_stmt.is_null() && !val.is_null() {
         let stmt = unsafe { &*pg_stmt };
-        let sql_bytes = unsafe { if !stmt.sql.is_null() { crate::byte_utils::cstr_bytes(stmt.sql) } else { b"" } };
-        
+        let sql_bytes = unsafe {
+            if !stmt.sql.is_null() {
+                crate::byte_utils::cstr_bytes(stmt.sql)
+            } else {
+                b""
+            }
+        };
+
         let bypass = std::env::var("BYPASS_UUID_INTERCEPT").is_ok();
         if !bypass && crate::byte_utils::contains_bytes(sql_bytes, b"devices") {
             let actual_len = if n_bytes == u64::MAX {
@@ -324,18 +357,27 @@ pub(super) fn bind_text64_impl(
                 n_bytes as usize
             };
             if actual_len == 0 {
-                let param_name = crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, idx);
+                let param_name =
+                    crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, idx);
                 let is_identifier = if !param_name.is_null() {
-                    let name_str = unsafe { std::ffi::CStr::from_ptr(param_name).to_string_lossy().to_lowercase() };
+                    let name_str = unsafe {
+                        std::ffi::CStr::from_ptr(param_name)
+                            .to_string_lossy()
+                            .to_lowercase()
+                    };
                     name_str.contains("identifier")
                 } else {
-                    let sql_str = crate::db_interpose_conn_utils::cstr_to_string_or(stmt.sql, "").to_lowercase();
+                    let sql_str = crate::db_interpose_conn_utils::cstr_to_string_or(stmt.sql, "")
+                        .to_lowercase();
                     sql_str.contains("where identifier") || (sql_str.contains("select") && idx == 1)
                 };
 
                 if is_identifier {
                     _intercepted_uuid = get_machine_identifier();
-                    log_debug_lazy!("INTERCEPTED empty UUID bind on devices (64), replacing with {}", _intercepted_uuid);
+                    log_debug_lazy!(
+                        "INTERCEPTED empty UUID bind on devices (64), replacing with {}",
+                        _intercepted_uuid
+                    );
                     val = _intercepted_uuid.as_ptr() as *const c_char;
                     n_bytes = _intercepted_uuid.len() as u64;
                 }
@@ -396,7 +438,10 @@ mod tests {
     fn test_parse_machine_identifier_valid() {
         let xml = r#"<?xml version="1.0" encoding="utf-8"?><Preferences MachineIdentifier="53cfd87bf8b24db2af2d6aaa373b2b34" ProcessedMachineIdentifier="53cfd87bf8b24db2af2d6aaa373b2b34" AcceptedEULA="1"/>"#;
         let uuid = parse_machine_identifier(xml);
-        assert_eq!(uuid, Some("53cfd87b-f8b2-4db2-af2d-6aaa373b2b34".to_string()));
+        assert_eq!(
+            uuid,
+            Some("53cfd87b-f8b2-4db2-af2d-6aaa373b2b34".to_string())
+        );
     }
 
     #[test]

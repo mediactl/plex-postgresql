@@ -93,7 +93,10 @@ pub(crate) fn is_maintenance_noop_str(sql: &str) -> bool {
     let trimmed = strip_leading_ws_and_sql_comments(sql);
     let lower = trimmed.to_lowercase();
     for kw in ["vacuum", "reindex"] {
-        if lower == kw || lower.strip_prefix(kw).is_some_and(|r| r.starts_with(char::is_whitespace))
+        if lower == kw
+            || lower
+                .strip_prefix(kw)
+                .is_some_and(|r| r.starts_with(char::is_whitespace))
         {
             return true;
         }

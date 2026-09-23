@@ -115,7 +115,6 @@ unsafe fn resolve_syscall() -> Option<SyscallFn> {
     resolve_symbol(&mut ORIG_SYSCALL, b"syscall\0")
 }
 
-
 unsafe fn set_errno(err: c_int) {
     *libc::__errno_location() = err;
 }

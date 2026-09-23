@@ -691,9 +691,8 @@ pub unsafe extern "C" fn posix_spawnp(
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_from_env, inject_ld_preload_entry, process_label_from_parts,
-        record_loader_pid, rewrite_env_entry, should_adjust_child_env,
-        should_keep_env_for_process, LOADER_PID,
+        configure_from_env, inject_ld_preload_entry, process_label_from_parts, record_loader_pid,
+        rewrite_env_entry, should_adjust_child_env, should_keep_env_for_process, LOADER_PID,
     };
     use std::sync::atomic::Ordering;
 

@@ -501,11 +501,7 @@ mod tests {
         assert!(up.contains("DROP TABLE"), "{}", r.sql);
 
         let r = translate("drop trigger if exists metadata_items_after_insert").unwrap();
-        assert!(
-            r.sql.to_uppercase().contains("DROP TRIGGER"),
-            "{}",
-            r.sql
-        );
+        assert!(r.sql.to_uppercase().contains("DROP TRIGGER"), "{}", r.sql);
     }
 
     #[test]

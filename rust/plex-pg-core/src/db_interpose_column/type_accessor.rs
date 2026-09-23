@@ -378,8 +378,9 @@ pub(super) fn column_type_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
 
     if !raw_pg_stmt.is_null() && unsafe { (&*raw_pg_stmt).is_pg != 0 } {
         let pg_stmt = unsafe { &mut *raw_pg_stmt };
-        let needs_metadata =
-            pg_stmt.result.is_null() && pg_stmt.cached_result.is_null() && !pg_stmt.pg_sql.is_null();
+        let needs_metadata = pg_stmt.result.is_null()
+            && pg_stmt.cached_result.is_null()
+            && !pg_stmt.pg_sql.is_null();
         if needs_metadata {
             ensure_pg_result_for_metadata(raw_pg_stmt);
         }

@@ -54,7 +54,11 @@ fn db_to_pool_counts_handles_still_holding_a_slot() {
     assert_eq!(dtp.references(5), 1, "closing one handle leaves the other");
 
     dtp.release(0x200);
-    assert_eq!(dtp.references(5), 0, "the last handle closing frees the slot");
+    assert_eq!(
+        dtp.references(5),
+        0,
+        "the last handle closing frees the slot"
+    );
 }
 
 #[test]

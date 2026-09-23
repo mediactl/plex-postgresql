@@ -38,9 +38,7 @@ pub fn transform(stmt: &mut Statement) {
         }
         Statement::Delete(d) => {
             let tables = match &d.from {
-                FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => {
-                    table_names_in(t)
-                }
+                FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => table_names_in(t),
             };
             let _scope = TextColumnScope::for_tables(&tables);
             if let Some(sel) = &mut d.selection {
@@ -930,7 +928,8 @@ impl TextColumnScope {
                 }
             }
         }
-        let previous = STATEMENT_TEXT_COLUMNS.with(|c| std::mem::replace(&mut *c.borrow_mut(), columns));
+        let previous =
+            STATEMENT_TEXT_COLUMNS.with(|c| std::mem::replace(&mut *c.borrow_mut(), columns));
         Self { previous }
     }
 }
@@ -963,8 +962,7 @@ fn table_names_in(from: &[TableWithJoins]) -> Vec<String> {
 }
 
 fn is_known_text_column(col: &str) -> bool {
-    KNOWN_TEXT_COLUMNS.contains(&col)
-        || STATEMENT_TEXT_COLUMNS.with(|c| c.borrow().contains(&col))
+    KNOWN_TEXT_COLUMNS.contains(&col) || STATEMENT_TEXT_COLUMNS.with(|c| c.borrow().contains(&col))
 }
 
 /// Known columns that are stored as INTEGER in Plex but sometimes compared with strings
@@ -1607,9 +1605,21 @@ mod tests {
         )
         .unwrap();
         let sql = r.sql.to_lowercase();
-        assert!(sql.contains("version = 202608120900::text"), "outer, before: {}", r.sql);
-        assert!(!sql.contains("version = 3::text"), "inner must not be cast: {}", r.sql);
-        assert!(sql.contains("version <> 5::text"), "outer, after the subquery: {}", r.sql);
+        assert!(
+            sql.contains("version = 202608120900::text"),
+            "outer, before: {}",
+            r.sql
+        );
+        assert!(
+            !sql.contains("version = 3::text"),
+            "inner must not be cast: {}",
+            r.sql
+        );
+        assert!(
+            sql.contains("version <> 5::text"),
+            "outer, after the subquery: {}",
+            r.sql
+        );
     }
 
     #[test]

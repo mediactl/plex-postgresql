@@ -67,7 +67,10 @@ fn type_unknown_oid_is_text() {
 
 #[test]
 fn decltype_int8_is_dt_integer_8() {
-    assert_eq!(oid_to_sqlite_decltype(20).to_str().unwrap(), "dt_integer(8)");
+    assert_eq!(
+        oid_to_sqlite_decltype(20).to_str().unwrap(),
+        "dt_integer(8)"
+    );
 }
 
 #[test]

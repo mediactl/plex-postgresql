@@ -280,7 +280,10 @@ fn worker_init_does_not_spawn_a_second_worker() {
 
     unsafe {
         rust_worker_cleanup();
-        assert_eq!(worker_running, 0, "worker should be stopped before the test");
+        assert_eq!(
+            worker_running, 0,
+            "worker should be stopped before the test"
+        );
 
         assert_eq!(rust_worker_init(), 0);
         let first = worker_thread;

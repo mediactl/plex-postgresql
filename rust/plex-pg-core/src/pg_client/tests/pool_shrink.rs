@@ -65,7 +65,10 @@ fn an_idle_unreferenced_connection_is_destroyed_even_when_no_thread_needs_a_slot
     let path = c("/data/com.plexapp.plugins.library.db");
     let got = pool_acquire::acquire_on(&pm, path.as_ptr(), std::ptr::null());
     crate::libpq_helpers::PQ_STATUS_OVERRIDE.with(|c| c.set(None));
-    assert_eq!(got, my_conn as *mut c_void, "the fast path handed back this thread's own connection");
+    assert_eq!(
+        got, my_conn as *mut c_void,
+        "the fast path handed back this thread's own connection"
+    );
     assert_eq!(mine.state.load(Ordering::Relaxed), SLOT_READY);
 
     assert!(

@@ -1,11 +1,11 @@
 use super::*;
-use crate::log_debug_lazy;
 use crate::db_interpose_common::{
     CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN, CRASH_LAST_COLUMN_MAX_LEN, CRASH_LAST_COLUMN_SEQ,
 };
 use crate::db_interpose_value::support::{
     fake_value_has_result, helpers_result_ptr, load_fake_value_context, sqlite_type_name,
 };
+use crate::log_debug_lazy;
 use crate::log_info_lazy;
 
 pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
