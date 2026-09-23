@@ -88,3 +88,38 @@ pub extern "C" fn rust_step_read_prepare_reexecution_state(
         stmt_ref.current_row = -1;
     }
 }
+
+/// The connection a statement that is mid-stream must keep stepping on, or
+/// null when the pool should be asked as usual.
+///
+/// The step resolved its connection through the pool on every call, and the
+/// pool refuses to hand a thread the slot it is streaming from -- the flag the
+/// statement itself set on its first row. So the statement's own second step
+/// was given a different connection, `should_clear_cross_thread_result` read
+/// that as the statement having crossed threads, cancelled the stream and ran
+/// the query again eagerly, and Plex was handed the first row twice. A play
+/// queue built from one movie held it twice, and the movie played again when
+/// it finished. Every SELECT Plex steps more than once did this; the pods'
+/// statement logs show each one executed on two connections, a few
+/// milliseconds apart.
+///
+/// A statement streaming on the thread that started it stays on that
+/// connection. Another thread stepping it keeps the requery, which is what
+/// the check was for.
+pub(crate) unsafe fn streaming_conn_for_this_thread(stmt: *const PgStmt) -> *mut PgConnection {
+    if stmt.is_null() {
+        return std::ptr::null_mut();
+    }
+    let s = &*stmt;
+    if s.streaming_mode == 0 {
+        return std::ptr::null_mut();
+    }
+    let sc = s.streaming_conn();
+    if sc.is_null() || (*sc).conn.is_null() {
+        return std::ptr::null_mut();
+    }
+    if libc::pthread_equal(s.executing_thread, libc::pthread_self()) == 0 {
+        return std::ptr::null_mut();
+    }
+    sc
+}

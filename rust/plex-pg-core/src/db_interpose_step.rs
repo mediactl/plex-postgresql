@@ -245,7 +245,13 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
 
     if !pg_stmt.is_null() {
         let s = &*pg_stmt;
-        if !s.shadow_stmt.is_null() {
+        // A statement that is mid-stream stays on the connection it is
+        // streaming from. Asking the pool here handed its own second step a
+        // different connection, which read as the statement crossing threads
+        // and ran the query again from the first row; see
+        // streaming_conn_for_this_thread.
+        exec_conn = crate::db_interpose_step_read_utils::streaming_conn_for_this_thread(pg_stmt);
+        if exec_conn.is_null() && !s.shadow_stmt.is_null() {
             let db = call_sqlite3_db_handle(s.shadow_stmt);
             let handle_conn = crate::pg_client::rust_pg_find_connection(db);
             if !handle_conn.is_null() {

@@ -21,6 +21,7 @@ use next_result::{
 };
 use play_queue_trace::{trace_play_queue_params, trace_play_queue_result};
 pub use reexecution::rust_step_read_prepare_reexecution_state;
+pub(crate) use reexecution::streaming_conn_for_this_thread;
 #[allow(unused_imports)]
 use reexecution::{
     adopt_materialized_result_owner, should_clear_cross_thread_result, should_use_streaming,
@@ -113,7 +114,7 @@ mod tests {
     }
     use super::{
         adopt_materialized_result_owner, rust_step_read_prepare_reexecution_state,
-        should_clear_cross_thread_result, should_use_streaming,
+        should_clear_cross_thread_result, should_use_streaming, streaming_conn_for_this_thread,
     };
     use crate::ffi_types::{PgConnection, PgStmt};
     use crate::libpq_helpers::PGresult;
@@ -253,6 +254,70 @@ mod tests {
 
         assert!(should_use_streaming(stmt_ptr, false));
 
+        rust_stmt_free(stmt_ptr);
+    }
+
+    #[test]
+    fn a_statement_mid_stream_keeps_its_connection_on_its_own_thread() {
+        // Its own second step used to ask the pool, which refused the slot the
+        // statement was streaming from, and the query was run again from the
+        // first row on whatever connection came back.
+        let stmt_ptr = make_stmt();
+        let conn = fake_pool_conn();
+        unsafe {
+            (*conn).conn = std::ptr::NonNull::dangling().as_ptr(); // never dereferenced
+        }
+        let s = unsafe { &mut *stmt_ptr };
+        s.streaming_mode = 1;
+        s.set_streaming_conn(conn);
+        s.set_result_conn(conn);
+        s.executing_thread = unsafe { libc::pthread_self() };
+
+        let keep = unsafe { streaming_conn_for_this_thread(stmt_ptr) };
+        assert_eq!(keep, conn, "the step stays on the streaming connection");
+        assert!(
+            !should_clear_cross_thread_result(stmt_ptr, keep),
+            "and so nothing reads as a crossed thread"
+        );
+
+        rust_stmt_free(stmt_ptr);
+    }
+
+    #[test]
+    fn a_statement_that_is_not_streaming_asks_the_pool() {
+        let stmt_ptr = make_stmt();
+        let conn = fake_pool_conn();
+        let s = unsafe { &mut *stmt_ptr };
+        s.streaming_mode = 0;
+        s.set_streaming_conn(conn);
+        s.executing_thread = unsafe { libc::pthread_self() };
+        assert!(unsafe { streaming_conn_for_this_thread(stmt_ptr) }.is_null());
+        rust_stmt_free(stmt_ptr);
+    }
+
+    #[test]
+    fn a_statement_streaming_on_another_thread_still_requeries() {
+        // The cross-thread case is what the requery was written for; it keeps it.
+        let stmt_ptr = make_stmt();
+        let conn = fake_pool_conn();
+        unsafe {
+            (*conn).conn = std::ptr::NonNull::dangling().as_ptr();
+        }
+        let s = unsafe { &mut *stmt_ptr };
+        s.streaming_mode = 1;
+        s.set_streaming_conn(conn);
+        s.set_result_conn(conn);
+        s.executing_thread = unsafe { libc::pthread_self() };
+        let stmt_addr = stmt_ptr as usize;
+        let from_other = std::thread::spawn(move || unsafe {
+            streaming_conn_for_this_thread(stmt_addr as *const PgStmt).is_null()
+        })
+        .join()
+        .unwrap();
+        assert!(
+            from_other,
+            "another thread gets null and takes the requery path"
+        );
         rust_stmt_free(stmt_ptr);
     }
 }
