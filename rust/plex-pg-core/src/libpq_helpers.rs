@@ -185,10 +185,23 @@ pub extern "C" fn rust_pq_error_message(conn: *mut PGconn) -> *const c_char {
     unsafe { PQerrorMessage(conn) }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for `PQstatus` on this thread, so the pool's fast
+    /// path -- which asks whether a slot's connection is still good -- can
+    /// be driven without a server behind it.
+    pub(crate) static PQ_STATUS_OVERRIDE: std::cell::Cell<Option<c_int>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[no_mangle]
 pub extern "C" fn rust_pq_status(conn: *mut PGconn) -> c_int {
     if conn.is_null() {
         return -1;
+    }
+    #[cfg(test)]
+    if let Some(status) = PQ_STATUS_OVERRIDE.with(|c| c.get()) {
+        return status;
     }
     unsafe { PQstatus(conn) }
 }

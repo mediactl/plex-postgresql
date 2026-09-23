@@ -19,6 +19,8 @@ mod hash_sqlstate;
 mod path_selection;
 #[path = "tests/pool_manager.rs"]
 mod pool_manager;
+#[path = "tests/pool_shrink.rs"]
+mod pool_shrink;
 #[path = "tests/pool_slot.rs"]
 mod pool_slot;
 #[path = "tests/reaper.rs"]

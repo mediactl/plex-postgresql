@@ -4,9 +4,20 @@ use crate::ffi_types::PgConnection;
 
 use super::super::connection_helpers::conn_is_streaming_active_ptr;
 use super::super::connection_lifecycle::destroy_pool_connection;
-use super::super::SLOT_READY;
+use super::super::{PoolManager, SLOT_READY};
 use super::shared::AcquireCtx;
 use crate::log_info_lazy;
+
+/// How often the idle reaper runs, in seconds. Zombie reclaim and the reap
+/// together are one scan of the slots, so this is also the cadence of the
+/// periodic pass that keeps a warm pool shrinking.
+pub(crate) const REAP_INTERVAL_SECS: i64 = 60;
+
+/// Whether the periodic pass is due: the reaper's interval has passed since
+/// it last ran. One atomic load, because every acquire asks.
+pub(crate) fn maintenance_due(pm: &PoolManager, now: i64) -> bool {
+    now - pm.last_reap_time.load(Ordering::Relaxed) >= REAP_INTERVAL_SECS
+}
 
 pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
     let idle_timeout = ctx.pm.idle_timeout_secs.load(Ordering::Relaxed) as i64;
@@ -52,7 +63,7 @@ pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
     }
 
     let last_reap = ctx.pm.last_reap_time.load(Ordering::Relaxed);
-    if ctx.now - last_reap < 60 {
+    if ctx.now - last_reap < REAP_INTERVAL_SECS {
         return;
     }
     if ctx

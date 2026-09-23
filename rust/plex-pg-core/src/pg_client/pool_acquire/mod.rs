@@ -1,8 +1,8 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 
-use super::pool;
 use super::threading::current_thread_id;
+use super::{pool, PoolManager};
 
 mod maintenance;
 mod pathing;
@@ -10,6 +10,7 @@ mod phases;
 mod retry;
 mod shared;
 
+pub(crate) use maintenance::maintenance_due;
 use maintenance::reclaim_zombies_and_reap;
 use pathing::{remember_library_path, resolve_selected_pool_path};
 use phases::{
@@ -27,7 +28,16 @@ pub(super) fn pool_get_connection_inner_excluding(
     db_path: *const c_char,
     exclude_conn: *const c_void,
 ) -> *mut c_void {
-    let pm = pool();
+    acquire_on(pool(), db_path, exclude_conn)
+}
+
+/// The acquire itself, on an explicit pool so a test can run it on one it
+/// owns; production goes through `pool_get_connection_inner_excluding`.
+pub(super) fn acquire_on(
+    pm: &PoolManager,
+    db_path: *const c_char,
+    exclude_conn: *const c_void,
+) -> *mut c_void {
     let selected_path = match resolve_selected_pool_path(pm, db_path, exclude_conn) {
         Some(path) => path,
         None => return std::ptr::null_mut(),
@@ -52,10 +62,22 @@ pub(super) fn pool_get_connection_inner_excluding(
         exclude_conn,
     };
 
+    // Shrinking is a matter of time, not of demand. On a warm pool every
+    // thread already owns a READY slot, so phase 1 answers every acquire and
+    // the pass below it -- the only place idle connections were reclaimed and
+    // reaped -- never ran again after the last burst: three pods held 35-48
+    // PostgreSQL connections idle for a quarter of an hour. So the pass also
+    // runs on the reaper's cadence whatever the acquire does next, at the
+    // price of one atomic load per acquire when it is not due.
+    if maintenance_due(pm, now) {
+        reclaim_zombies_and_reap(&ctx);
+    }
+
     if let AcquireDecision::Return(conn) = phase1_existing_ready(&ctx) {
         return conn;
     }
 
+    // A thread that needs a slot reclaims now, whether or not the pass is due.
     reclaim_zombies_and_reap(&ctx);
 
     if let AcquireDecision::Return(conn) = phase2_reuse_existing(&ctx) {
