@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::log_error;
 use crate::ffi_types::PgConnection;
+use crate::log_info_lazy;
 
 use super::super::super::connection_helpers::conn_is_pg_active_ptr;
 use super::super::super::connection_lifecycle::create_pool_connection;
@@ -41,10 +42,13 @@ pub(crate) fn phase5_autogrow(ctx: &AcquireCtx<'_>) -> AcquireDecision {
 
     claim_slot_for_thread(ctx, slot);
 
-    log_error(&format!(
+    // Growth is the pool doing its job, not a fault: a burst of new threads
+    // needs slots and gets them. It was logged at ERROR and read as one.
+    log_info_lazy!(
         "Pool: auto-grew {} -> {} (thread needs slot)",
-        current_size, new_size
-    ));
+        current_size,
+        new_size
+    );
 
     let new_conn = create_pool_connection(ctx.db_path);
     if !new_conn.is_null() && conn_is_pg_active_ptr(new_conn as *mut PgConnection) {
