@@ -23,6 +23,21 @@ pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
             continue;
         }
 
+        // A handle still holding this slot settles it, whatever the idle time
+        // and whatever became of the thread that opened it.
+        //
+        // This check is the point of the reclaim, not an extra guard on it.
+        // Plex opens twenty database handles when it starts and keeps them
+        // for the life of the process, while the worker threads that used
+        // them come and go — so a slot idle for minutes with a dead owner
+        // thread is ordinary rather than abandoned. Reclaiming one handed a
+        // live PGconn to a second thread, and libpq is not thread-safe per
+        // connection: Plex corrupted its own heap and aborted mid-statement,
+        // leaving no crash dump and no segfault behind to explain it.
+        if ctx.pm.slot_is_referenced(i) {
+            continue;
+        }
+
         let owner = slot.owner_thread.load(Ordering::Acquire);
         if check_thread_alive(owner) {
             continue;

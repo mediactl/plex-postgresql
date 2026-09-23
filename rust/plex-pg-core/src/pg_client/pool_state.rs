@@ -170,6 +170,17 @@ impl PoolManager {
         }
     }
 
+    /// Whether any database handle still holds this slot.
+    ///
+    /// The pool's reference count, and the only sound basis for deciding a
+    /// slot is free to take back. It is deliberately not a guess about idle
+    /// time or thread liveness: Plex keeps database handles open for the life
+    /// of the process while the threads that used them come and go, so
+    /// neither of those says whether the connection is still in use.
+    pub fn slot_is_referenced(&self, slot_index: usize) -> bool {
+        self.db_to_pool.references(slot_index) > 0
+    }
+
     /// Get configured pool size.
     pub fn pool_size(&self) -> usize {
         self.configured_size
@@ -313,6 +324,16 @@ impl PoolManager {
             }
             let last_used = slot.last_used.load(Ordering::Acquire);
             if now - last_used < timeout {
+                continue;
+            }
+
+            // Belt and braces. A FREE slot should have no handles left on it,
+            // because releasing a handle is what frees the slot — but the
+            // zombie reclaim used to put a slot back to FREE without touching
+            // the map, and what follows here is PQfinish. Destroying a
+            // connection somebody still holds is the worst version of this
+            // bug, so it is worth the lookup to refuse.
+            if self.slot_is_referenced(i) {
                 continue;
             }
 

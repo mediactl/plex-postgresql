@@ -82,6 +82,21 @@ impl DbToPool {
         mutex_lock(&self.map).get(&db_handle).copied()
     }
 
+    /// How many database handles still hold `slot_index`.
+    ///
+    /// This is the pool's reference count, and it is the only sound answer to
+    /// "is anyone still using this slot?". The map gains an entry when a
+    /// handle is tracked to a slot and loses it when that handle is released,
+    /// so a non-zero count means Plex has not finished with the connection —
+    /// whatever the slot's idle time says, and whatever became of the thread
+    /// that first opened it.
+    pub(crate) fn references(&self, slot_index: usize) -> usize {
+        mutex_lock(&self.map)
+            .values()
+            .filter(|&&slot| slot == slot_index)
+            .count()
+    }
+
     pub(crate) fn clear(&self) {
         mutex_lock(&self.map).clear();
     }

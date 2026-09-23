@@ -152,3 +152,28 @@ fn pool_manager_touch_unknown_conn_is_noop() {
     pm.touch_connection(0xBEEF as *const c_void, 999);
     // Should not panic or modify anything
 }
+
+#[test]
+fn pool_manager_slot_held_by_a_database_handle_is_referenced() {
+    // The zombie reclaim decided a slot was abandoned from its idle time and
+    // whether the thread that opened it was still alive. Neither says
+    // anything about whether Plex still holds the handle: it opens twenty at
+    // startup and keeps them for the life of the process, while the worker
+    // threads that used them come and go.
+    //
+    // Reclaiming one of those handed a live PGconn to a second thread, and
+    // libpq is not thread-safe per connection, so Plex corrupted its heap and
+    // died with no dump and no segfault left behind to explain it.
+    let pm = PoolManager::new(5, 64);
+    assert!(!pm.slot_is_referenced(3));
+
+    pm.db_to_pool.assign(0x100, 3);
+    assert!(pm.slot_is_referenced(3), "a handle holds this slot");
+    assert!(!pm.slot_is_referenced(4), "and only this slot");
+
+    pm.db_to_pool.release(0x100);
+    assert!(
+        !pm.slot_is_referenced(3),
+        "once Plex closes the handle the slot is genuinely free"
+    );
+}
