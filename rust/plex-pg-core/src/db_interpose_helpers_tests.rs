@@ -227,6 +227,18 @@ fn normalize_sql_literals_extracts_two_params() {
 }
 
 #[test]
+fn normalize_sql_literals_keeps_non_ascii_text() {
+    let sql = "SELECT * FROM t WHERE path = 'La Jetée (1962)' AND id = 123";
+    let (normalized, params) =
+        normalize_sql_literals_impl(sql).expect("expected normalized result");
+    assert_eq!(
+        normalized,
+        "SELECT * FROM t WHERE path = 'La Jetée (1962)' AND id = $1"
+    );
+    assert_eq!(params, vec!["123".to_string()]);
+}
+
+#[test]
 fn normalize_sql_literals_skips_insert() {
     assert!(normalize_sql_literals_impl("INSERT INTO t VALUES (1)").is_none());
 }

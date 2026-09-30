@@ -1,4 +1,5 @@
 use super::*;
+use crate::byte_utils::push_utf8_byte;
 
 pub(super) fn preprocess_sql(sql: &str) -> String {
     let sql = fix_placeholder_spacing(sql);
@@ -442,7 +443,7 @@ fn find_top_level_keyword_from(stmt: &str, start: usize, keyword: &str) -> Optio
             }
             _ if depth == 0 => {
                 if i + kw.len() <= bytes.len()
-                    && stmt[i..i + kw.len()].eq_ignore_ascii_case(keyword)
+                    && bytes[i..i + kw.len()].eq_ignore_ascii_case(kw)
                     && (i == 0 || !is_ident_char(bytes[i - 1]))
                     && (i + kw.len() == bytes.len() || !is_ident_char(bytes[i + kw.len()]))
                 {
@@ -535,7 +536,7 @@ fn rewrite_regexp_operator(sql: &str) -> String {
             out.push('\'');
             i += 1;
             while i < bytes.len() {
-                out.push(bytes[i] as char);
+                push_utf8_byte(&mut out, sql, i);
                 if bytes[i] == b'\'' {
                     i += 1;
                     if i < bytes.len() && bytes[i] == b'\'' {
@@ -570,7 +571,7 @@ fn rewrite_regexp_operator(sql: &str) -> String {
             }
         }
 
-        out.push(bytes[i] as char);
+        push_utf8_byte(&mut out, sql, i);
         i += 1;
     }
     out
@@ -587,7 +588,7 @@ fn rewrite_raise_function_calls(sql: &str) -> String {
             out.push('\'');
             i += 1;
             while i < bytes.len() {
-                out.push(bytes[i] as char);
+                push_utf8_byte(&mut out, sql, i);
                 if bytes[i] == b'\'' {
                     i += 1;
                     if i < bytes.len() && bytes[i] == b'\'' {
@@ -637,7 +638,7 @@ fn rewrite_raise_function_calls(sql: &str) -> String {
             continue;
         }
 
-        out.push(bytes[i] as char);
+        push_utf8_byte(&mut out, sql, i);
         i += 1;
     }
     out
@@ -674,7 +675,7 @@ fn strip_create_table_on_conflict_clauses(stmt: &str) -> String {
             out.push('\'');
             i += 1;
             while i < bytes.len() {
-                out.push(bytes[i] as char);
+                push_utf8_byte(&mut out, stmt, i);
                 if bytes[i] == b'\'' {
                     i += 1;
                     if i < bytes.len() && bytes[i] == b'\'' {
@@ -716,7 +717,7 @@ fn strip_create_table_on_conflict_clauses(stmt: &str) -> String {
             }
         }
 
-        out.push(bytes[i] as char);
+        push_utf8_byte(&mut out, stmt, i);
         i += 1;
     }
     out
@@ -1689,7 +1690,7 @@ fn parse_quoted_token(stmt: &str, start: usize) -> Option<(char, String, usize)>
             }
             return Some((quote, out, i));
         }
-        out.push(ch);
+        push_utf8_byte(&mut out, stmt, i);
         i += 1;
     }
 
@@ -1723,7 +1724,7 @@ fn rewrite_identifier_quotes_in_segment(segment: &str) -> String {
             }
         }
 
-        out.push(bytes[i] as char);
+        push_utf8_byte(&mut out, segment, i);
         i += 1;
     }
 
@@ -2190,7 +2191,7 @@ fn replace_metadata_items_refs(sql: &str, new_alias: &str) -> String {
             i += 1;
             while i < bytes.len() {
                 let ch = bytes[i];
-                result.push(ch as char);
+                push_utf8_byte(&mut result, sql, i);
                 i += 1;
                 if ch == b'\'' {
                     // escaped '' or end of string
@@ -2214,7 +2215,7 @@ fn replace_metadata_items_refs(sql: &str, new_alias: &str) -> String {
             continue;
         }
 
-        result.push(bytes[i] as char);
+        push_utf8_byte(&mut result, sql, i);
         i += 1;
     }
 
@@ -2235,7 +2236,7 @@ fn fix_placeholder_spacing(sql: &str) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         if in_string {
-            result.push(b as char);
+            push_utf8_byte(&mut result, sql, i);
             if b == string_char {
                 if i + 1 < bytes.len() && bytes[i + 1] == string_char {
                     result.push(bytes[i + 1] as char);
@@ -2308,7 +2309,7 @@ fn fix_placeholder_spacing(sql: &str) -> String {
             continue;
         }
 
-        result.push(b as char);
+        push_utf8_byte(&mut result, sql, i);
         i += 1;
     }
     result
@@ -2319,7 +2320,7 @@ fn fix_placeholder_spacing(sql: &str) -> String {
 fn rewrite_glob(sql: &str) -> String {
     // We do a case-insensitive scan for the word GLOB followed by a quoted string.
     // Strategy: tokenise by single-quoted strings to avoid false positives inside literals.
-    let upper = sql.to_uppercase();
+    let upper = sql.to_ascii_uppercase();
     // Fast path – nothing to do
     if !upper.contains("GLOB") {
         return sql.to_string();
@@ -2345,15 +2346,15 @@ fn rewrite_glob(sql: &str) -> String {
                     }
                     break;
                 }
-                result.push(bytes[i] as char);
+                push_utf8_byte(&mut result, sql, i);
                 i += 1;
             }
             continue;
         }
 
         // Check for GLOB keyword (case-insensitive, word boundary)
-        let rest = &sql[i..];
-        let rest_upper = &upper[i..];
+        let rest = sql.get(i..).unwrap_or("");
+        let rest_upper = upper.get(i..).unwrap_or("");
         if rest_upper.starts_with("GLOB") {
             // Must be followed by whitespace / quote (word boundary)
             let after = i + 4;
@@ -2380,7 +2381,7 @@ fn rewrite_glob(sql: &str) -> String {
                                 break;
                             }
                         } else {
-                            pattern.push(bytes[i] as char);
+                            push_utf8_byte(&mut pattern, sql, i);
                             i += 1;
                         }
                     }
@@ -2413,7 +2414,7 @@ fn rewrite_glob(sql: &str) -> String {
 /// - `INDEXED BY <identifier>`
 /// - `NOT INDEXED`
 fn rewrite_indexed_by(sql: &str) -> String {
-    let upper = sql.to_uppercase();
+    let upper = sql.to_ascii_uppercase();
     if !upper.contains("INDEXED") {
         return sql.to_string();
     }
@@ -2438,13 +2439,13 @@ fn rewrite_indexed_by(sql: &str) -> String {
                     }
                     break;
                 }
-                result.push(bytes[i] as char);
+                push_utf8_byte(&mut result, sql, i);
                 i += 1;
             }
             continue;
         }
 
-        let rest_upper = &upper[i..];
+        let rest_upper = upper.get(i..).unwrap_or("");
         if rest_upper.starts_with("NOT INDEXED") {
             let after = i + "NOT INDEXED".len();
             let boundary = after >= sql.len()
@@ -2483,7 +2484,7 @@ fn rewrite_indexed_by(sql: &str) -> String {
             }
         }
 
-        result.push(bytes[i] as char);
+        push_utf8_byte(&mut result, sql, i);
         i += 1;
     }
 
@@ -2503,7 +2504,7 @@ fn rewrite_indexed_by(sql: &str) -> String {
 /// `NOCASE` is intentionally left intact; the AST-level transform in query.rs
 /// converts it to LOWER(…) which is the correct PostgreSQL semantic.
 fn rewrite_sqlite_collations(sql: &str) -> String {
-    let upper = sql.to_uppercase();
+    let upper = sql.to_ascii_uppercase();
     // Fast path — nothing to do
     if !upper.contains("COLLATE") {
         return sql.to_string();
@@ -2529,7 +2530,7 @@ fn rewrite_sqlite_collations(sql: &str) -> String {
                     }
                     break;
                 }
-                result.push(bytes[i] as char);
+                push_utf8_byte(&mut result, sql, i);
                 i += 1;
             }
             continue;
@@ -2550,7 +2551,7 @@ fn rewrite_sqlite_collations(sql: &str) -> String {
                     }
                     break;
                 }
-                result.push(bytes[i] as char);
+                push_utf8_byte(&mut result, sql, i);
                 i += 1;
             }
             continue;
@@ -2562,7 +2563,7 @@ fn rewrite_sqlite_collations(sql: &str) -> String {
             i += 1;
             while i < bytes.len() {
                 let ch = bytes[i] as char;
-                result.push(ch);
+                push_utf8_byte(&mut result, sql, i);
                 i += 1;
                 if ch == '`' {
                     break;
@@ -2572,7 +2573,7 @@ fn rewrite_sqlite_collations(sql: &str) -> String {
         }
 
         // Check for COLLATE keyword (case-insensitive, word boundary)
-        let rest_upper = &upper[i..];
+        let rest_upper = upper.get(i..).unwrap_or("");
         if rest_upper.starts_with("COLLATE") {
             let after = i + 7;
             let boundary = after >= sql.len()
@@ -2620,7 +2621,7 @@ fn rewrite_sqlite_collations(sql: &str) -> String {
             }
         }
 
-        result.push(bytes[i] as char);
+        push_utf8_byte(&mut result, sql, i);
         i += 1;
     }
 
