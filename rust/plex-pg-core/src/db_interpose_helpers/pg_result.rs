@@ -49,10 +49,10 @@ pub fn rust_column_text_reformat_aggregate(
 
     if oid == 20 {
         let val = pg_text_to_int64_impl(source_value);
-        let pg_sql = cstr_to_str(pg_sql).unwrap_or("");
+        // Only MIN/MAX timestamp formatting needs the SQL. A COUNT/SUM
+        // result must not rescan a potentially huge IN-list for every cell.
         if (col.eq_ignore_ascii_case("max") || col.eq_ignore_ascii_case("min"))
-            && !pg_sql.is_empty()
-            && pg_sql_has_timestamp_hint(pg_sql)
+            && cstr_to_str(pg_sql).is_some_and(pg_sql_has_timestamp_hint)
             && format_epoch_to_datetime_utc_impl(val, out, out_len) != 0
         {
             return 1;
@@ -62,6 +62,30 @@ pub fn rust_column_text_reformat_aggregate(
 
     let val = pg_text_to_int_impl(source_value);
     c_int::from(write_i32_to_buf(out, out_len, val))
+}
+
+/// None means libpq's NUL-terminated storage can be borrowed unchanged.
+/// Owned output has a trailing NUL and is kept until the next step/reset.
+pub(crate) fn column_text_transform_owned(
+    col_name: *const c_char, oid: c_uint, pg_sql: *const c_char,
+    source: *const c_char, bytes: &[u8],
+) -> Option<Vec<u8>> {
+    if std::str::from_utf8(bytes).is_err() { return Some(vec![0]); }
+    if matches!(oid, 20 | 21 | 23) {
+        let mut aggregate = [0 as c_char; 32];
+        if rust_column_text_reformat_aggregate(col_name, oid, pg_sql, source,
+            aggregate.as_mut_ptr(), aggregate.len()) != 0
+        {
+            return Some(unsafe { CStr::from_ptr(aggregate.as_ptr()) }.to_bytes_with_nul().to_vec());
+        }
+    }
+    // Most ordinary fields cannot contain a server URI. Avoid the multi-byte
+    // substring matcher for values with no colon.
+    if !bytes.contains(&b':') { return None; }
+    rewrite_server_library_uri_bytes(bytes, bytes.len()).map(|mut value| {
+        value.push(0);
+        value
+    })
 }
 
 pub fn rust_column_text_transform(
