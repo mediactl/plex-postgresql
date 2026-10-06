@@ -22,6 +22,19 @@ unsafe fn clear_dynamic_param_values(stmt: &mut PgStmt) {
     }
 }
 
+/// `sqlite3_clear_bindings`: every parameter becomes NULL, an int or a double
+/// in the preallocated buffer as much as a heap value. Reset keeps those
+/// (`clear_dynamic_param_values`); a clear that kept them sent the previous
+/// row's integers to a statement whose caller cleared and bound only some.
+unsafe fn clear_all_param_values(stmt: &mut PgStmt) {
+    clear_dynamic_param_values(stmt);
+    for v in stmt.param_values.iter_mut() {
+        *v = ptr::null_mut();
+    }
+    stmt.param_lengths.iter_mut().for_each(|l| *l = 0);
+    stmt.param_formats.iter_mut().for_each(|f| *f = 0);
+}
+
 unsafe fn reset_pg_stmt_locked(p_stmt: *mut sqlite3_stmt, stmt: *mut PgStmt) -> c_int {
     let stmt_ref = &mut *stmt;
     let _guard = PgStmt::lock_mutex(stmt);
@@ -167,7 +180,7 @@ pub(super) fn clear_bindings_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
         if !pg_stmt.is_null() {
             let pg_stmt_ref = &mut *pg_stmt;
             let _guard = PgStmt::lock_mutex(pg_stmt);
-            clear_dynamic_param_values(pg_stmt_ref);
+            clear_all_param_values(pg_stmt_ref);
             if pg_stmt_ref.is_pg == 0 {
                 return orig_sqlite3_clear_bindings
                     .map(|f| f(p_stmt))
