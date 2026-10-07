@@ -88,8 +88,9 @@ pub(crate) fn current_conn() -> *mut crate::ffi_types::sqlite3 {
 mod tests {
     use super::*;
     use crate::db_interpose_common::{
-        Sqlite3ExecCallback, Sqlite3ExecFn, Sqlite3NextStmtFn, Sqlite3Prepare16Fn,
-        Sqlite3PrepareFn, Sqlite3StmtToCStrFn, Sqlite3StmtToDbFn, Sqlite3StmtToIntFn,
+        Sqlite3DbToIntFn, Sqlite3ExecCallback, Sqlite3ExecFn, Sqlite3NextStmtFn,
+        Sqlite3Prepare16Fn, Sqlite3PrepareFn, Sqlite3StmtToCStrFn, Sqlite3StmtToDbFn,
+        Sqlite3StmtToIntFn,
     };
     use crate::ffi_types::sqlite3;
     use std::os::raw::{c_char, c_void};
@@ -128,6 +129,8 @@ mod tests {
         prepare_v2: Option<Sqlite3PrepareFn>,
         prepare16_v2: Option<Sqlite3Prepare16Fn>,
         exec: Option<Sqlite3ExecFn>,
+        close: Option<Sqlite3DbToIntFn>,
+        close_v2: Option<Sqlite3DbToIntFn>,
     }
 
     static mut REALS: Reals = Reals {
@@ -139,6 +142,8 @@ mod tests {
         prepare_v2: None,
         prepare16_v2: None,
         exec: None,
+        close: None,
+        close_v2: None,
     };
 
     unsafe fn reals() -> Reals {
@@ -164,6 +169,8 @@ mod tests {
                 prepare_v2: c::shim_sqlite3_prepare_v2,
                 prepare16_v2: c::orig_sqlite3_prepare16_v2,
                 exec: c::orig_sqlite3_exec,
+                close: c::orig_sqlite3_close,
+                close_v2: c::orig_sqlite3_close_v2,
             });
             FINALIZE_CALLS.store(0, Ordering::Relaxed);
             reset_test_state();
@@ -175,6 +182,8 @@ mod tests {
             c::shim_sqlite3_prepare_v2 = Some(fake_prepare_v2);
             c::orig_sqlite3_prepare16_v2 = Some(fake_prepare16_v2);
             c::orig_sqlite3_exec = Some(fake_exec);
+            c::orig_sqlite3_close = Some(fake_close);
+            c::orig_sqlite3_close_v2 = Some(fake_close_v2);
             FakeSqlite
         }
 
@@ -197,6 +206,8 @@ mod tests {
                 c::shim_sqlite3_prepare_v2 = r.prepare_v2;
                 c::orig_sqlite3_prepare16_v2 = r.prepare16_v2;
                 c::orig_sqlite3_exec = r.exec;
+                c::orig_sqlite3_close = r.close;
+                c::orig_sqlite3_close_v2 = r.close_v2;
                 FINALIZE_CALLS.store(0, Ordering::Relaxed);
                 reset_test_state();
             }
@@ -307,6 +318,24 @@ mod tests {
         SQLITE_OK
     }
 
+    /// Real close disconnecting an FTS4 table, which finalizes the statements
+    /// FTS3 prepared and cached inside libsqlite3.
+    unsafe extern "C" fn fake_close(db: *mut sqlite3) -> c_int {
+        if !is_fake(db) {
+            return reals().close.map(|f| f(db)).unwrap_or(SQLITE_ERROR);
+        }
+        finalize_internal_stmt();
+        SQLITE_OK
+    }
+
+    unsafe extern "C" fn fake_close_v2(db: *mut sqlite3) -> c_int {
+        if !is_fake(db) {
+            return reals().close_v2.map(|f| f(db)).unwrap_or(SQLITE_ERROR);
+        }
+        finalize_internal_stmt();
+        SQLITE_OK
+    }
+
     unsafe extern "C" fn fake_exec(
         db: *mut sqlite3,
         sql: *const c_char,
@@ -354,6 +383,27 @@ mod tests {
             remember_finalized_stmt(stmt, ptr::null(), 0);
             assert_eq!(rust_my_sqlite3_finalize(stmt), SQLITE_OK);
             assert_eq!(fakes.finalize_calls(), 0);
+        }
+    }
+
+    /// An address finalized several times holds several records. A prepare
+    /// the shim sees at that address must clear every one: with one left, the
+    /// new statement's own finalize was skipped and the statement leaked, so
+    /// PMS's guide staging database stayed open across its rename, lost its
+    /// WAL, and both it and the library file read as corrupt (2026-10-07).
+    /// VACUUM's internal statements, really finalized since clusterplex.25,
+    /// reuse one address hundreds of times.
+    #[test]
+    fn a_seen_prepare_clears_every_finalize_record_of_its_address() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        unsafe {
+            let fakes = FakeSqlite::install();
+            let stmt = 0x6789usize as *mut sqlite3_stmt;
+            remember_finalized_stmt(stmt, ptr::null(), 0);
+            remember_finalized_stmt(stmt, ptr::null(), 0);
+            rust_pg_note_stmt_prepare(stmt, c"SELECT 1".as_ptr());
+            assert_eq!(rust_my_sqlite3_finalize(stmt), SQLITE_OK);
+            assert_eq!(fakes.finalize_calls(), 1);
         }
     }
 
@@ -455,6 +505,39 @@ mod tests {
                 ptr::null_mut(),
             );
             assert_eq!(rc, SQLITE_OK);
+            assert_eq!(fakes.finalize_calls(), 1);
+        }
+    }
+
+    /// The same inside real close: sqlite3_close disconnects every virtual
+    /// table first, and FTS3 finalizes the statements it cached. Skipped,
+    /// one leaks, the connection cannot close, and its WAL outlives it -- so
+    /// PMS's guide staging database lost its newest pages when PMS renamed
+    /// it into place (2026-10-07, "disk I/O error" on the swapped guide).
+    #[test]
+    fn finalize_inside_close_of_a_live_stmt_at_a_reused_address_calls_original_finalize() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        unsafe {
+            let fakes = FakeSqlite::install();
+            reused_address(STMT, STMT as usize);
+            assert_eq!(
+                crate::db_interpose_open::rust_my_sqlite3_close(FAKE_DB),
+                SQLITE_OK
+            );
+            assert_eq!(fakes.finalize_calls(), 1);
+        }
+    }
+
+    #[test]
+    fn finalize_inside_close_v2_of_a_live_stmt_at_a_reused_address_calls_original_finalize() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        unsafe {
+            let fakes = FakeSqlite::install();
+            reused_address(STMT, STMT as usize);
+            assert_eq!(
+                crate::db_interpose_open::rust_my_sqlite3_close_v2(FAKE_DB),
+                SQLITE_OK
+            );
             assert_eq!(fakes.finalize_calls(), 1);
         }
     }

@@ -194,6 +194,11 @@ pub(super) unsafe fn clear_prepared_stmt(stmt: *mut sqlite3_stmt) {
     }
 }
 
+/// Forgets every record of `stmt` having been finalized: a statement the shim
+/// has seen prepared at that address is live. An address can hold many
+/// records -- SQLite's own statements reuse one address in a loop (VACUUM's
+/// copy of the schema) -- and clearing only the first left it "recently
+/// finalized", so the new statement's own finalize was skipped and it leaked.
 pub(super) unsafe fn clear_finalized_entry(stmt: *mut sqlite3_stmt) {
     if stmt.is_null() {
         return;
@@ -202,7 +207,6 @@ pub(super) unsafe fn clear_finalized_entry(stmt: *mut sqlite3_stmt) {
     for i in 0..FINALIZED_RING_SIZE {
         if ring[i].stmt == stmt {
             ring[i] = FinalizedEntry::empty();
-            return;
         }
     }
 }
