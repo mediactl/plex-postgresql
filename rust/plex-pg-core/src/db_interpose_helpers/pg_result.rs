@@ -89,6 +89,24 @@ pub fn rust_column_text_transform(
         return 1;
     }
 
+    // SQLite has no booleans: a comparison or exists() reads as 1 or 0, as
+    // text too. PostgreSQL's text is "t" or "f", which Plex parses as 0, so
+    // `select exists(...)` dropped every genre from the Categories view.
+    if oid == 16 && out_len >= 2 {
+        let digit = match bytes {
+            b"t" => Some(b'1'),
+            b"f" => Some(b'0'),
+            _ => None,
+        };
+        if let Some(d) = digit {
+            unsafe {
+                *out = d as c_char;
+                *out.add(1) = 0;
+            }
+            return 1;
+        }
+    }
+
     let out_cap = out_len.saturating_sub(1);
     if let Some(rewritten) = rewrite_server_library_uri_bytes(bytes, out_cap) {
         let n = rewritten.len().min(out_cap);
