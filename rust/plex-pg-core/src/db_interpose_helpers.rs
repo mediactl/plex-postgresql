@@ -20,6 +20,7 @@ mod badcast_trace;
 mod decltype;
 mod ffi_strings;
 mod pg_result;
+pub(crate) use pg_result::column_text_transform_owned;
 mod pure_helpers;
 mod string_utils;
 mod type_cache;
@@ -53,7 +54,7 @@ pub(crate) use string_utils::cstr_to_str_or_empty;
 use string_utils::{
     contains_ascii_icase, cstr_to_str, find_ascii_icase, find_closing_paren, find_subslice,
     has_boundary, is_next_numeric_boundary, is_prev_numeric_boundary, normalize_ident_token,
-    push_capped, split_csv_simple, starts_with_icase, write_buf, write_i32_to_buf,
+    split_csv_simple, starts_with_icase, write_buf, write_i32_to_buf,
     write_i64_to_buf,
 };
 pub use type_cache::{

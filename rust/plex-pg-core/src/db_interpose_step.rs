@@ -192,6 +192,16 @@ unsafe fn trace_step_null_select_stmt(
 #[no_mangle]
 pub extern "C" fn rust_my_sqlite3_step(p_stmt: *mut sqlite3_stmt) -> c_int {
     let dbg_stmt = crate::pg_statement::rust_stmt_find(p_stmt as usize) as *mut PgStmt;
+    // SQLite column pointers remain valid until the next step/reset/finalize.
+    // Only transformed strings are owned here; ordinary strings stay in PGresult.
+    let text_stmt = if dbg_stmt.is_null() {
+        crate::pg_statement::rust_stmt_find_any(p_stmt as usize) as *mut PgStmt
+    } else { dbg_stmt };
+    if !text_stmt.is_null() {
+        let _guard = unsafe { PgStmt::lock_mutex(text_stmt) };
+        unsafe { (&mut *text_stmt).owned_column_text.clear(); }
+    }
+
     let mut dbg_sql: *const c_char = std::ptr::null();
     let dbg_db: *mut sqlite3;
 
@@ -444,6 +454,18 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
                 return first_rc;
             } else if stmt_is_pg == 1 {
                 if write_executed {
+                    // An explicit RETURNING may contain more than one row.
+                    // Stepping advances its retained result without rerunning DML.
+                    let _stmt_guard = PgStmt::lock_mutex(pg_stmt);
+                    let s = &mut *pg_stmt;
+                    if !s.result.is_null() && s.metadata_only_result == 0
+                        && s.current_row < s.num_rows
+                    {
+                        s.current_row += 1;
+                        if s.current_row < s.num_rows {
+                            return SQLITE_ROW;
+                        }
+                    }
                     return SQLITE_DONE;
                 }
 
