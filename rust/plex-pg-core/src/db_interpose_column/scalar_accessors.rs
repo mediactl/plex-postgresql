@@ -12,7 +12,7 @@ struct LiveScalarState {
     col_name: *const c_char,
     is_null: bool,
     value_buf: [c_char; 128],
-    value_ptr: *const c_char,
+    value_valid: bool,
 }
 
 impl LiveScalarState {
@@ -23,7 +23,19 @@ impl LiveScalarState {
             col_name,
             is_null,
             value_buf: [0; 128],
-            value_ptr: ptr::null(),
+            value_valid: false,
+        }
+    }
+
+    /// The value's text, or null when none was read. Taken from the struct
+    /// where it is now: the state is returned by value, so a pointer into
+    /// `value_buf` kept as a field (as this had until upstream 5573fc1) points
+    /// at wherever the struct was built.
+    fn value_ptr(&self) -> *const c_char {
+        if self.value_valid {
+            self.value_buf.as_ptr()
+        } else {
+            ptr::null()
         }
     }
 }
@@ -101,7 +113,7 @@ unsafe fn load_live_scalar_state(
             state.value_buf.len(),
         );
         if val_len >= 0 {
-            state.value_ptr = state.value_buf.as_ptr();
+            state.value_valid = true;
         }
     }
 
@@ -136,8 +148,8 @@ pub(super) fn column_int_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
                 };
 
                 let mut rv = 0;
-                if !state.is_null && !state.value_ptr.is_null() {
-                    rv = pg_text_to_int_impl(state.value_ptr);
+                if !state.is_null && !state.value_ptr().is_null() {
+                    rv = pg_text_to_int_impl(state.value_ptr());
 
                     let mut masked = 0i64;
                     if mask_collection_metadata_type(
@@ -197,8 +209,8 @@ pub(super) fn column_int64_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> i64 {
                 };
 
                 let mut rv: i64 = 0;
-                if !state.is_null && !state.value_ptr.is_null() {
-                    rv = pg_text_to_int64_impl(state.value_ptr);
+                if !state.is_null && !state.value_ptr().is_null() {
+                    rv = pg_text_to_int64_impl(state.value_ptr());
 
                     let mut masked = 0i64;
                     if mask_collection_metadata_type(pg_stmt, state.col_name, rv, &mut masked) {
@@ -247,8 +259,8 @@ pub(super) fn column_double_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> f64 {
                     return 0.0;
                 };
 
-                if !state.is_null && !state.value_ptr.is_null() {
-                    pg_text_to_double_impl(state.value_ptr)
+                if !state.is_null && !state.value_ptr().is_null() {
+                    pg_text_to_double_impl(state.value_ptr())
                 } else {
                     0.0
                 }
@@ -261,4 +273,24 @@ pub(super) fn column_double_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> f64 {
     get_orig_sqlite3_column_double()
         .map(|f| unsafe { f(p_stmt, idx) })
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod live_state_tests {
+    use super::*;
+
+    /// The state is built in one place and read in another; its value must be
+    /// read from where the struct is, not from where it was built.
+    #[test]
+    fn a_live_value_is_read_from_the_struct_it_moved_with() {
+        let mut built = LiveScalarState::new(0, 20, ptr::null(), false);
+        assert!(built.value_ptr().is_null(), "no value read yet");
+        built.value_buf[0] = b'7' as c_char;
+        built.value_valid = true;
+
+        let moved = Box::new(built);
+        let start = moved.value_buf.as_ptr();
+        assert_eq!(moved.value_ptr(), start);
+        assert_eq!(pg_text_to_int_impl(moved.value_ptr()), 7);
+    }
 }
