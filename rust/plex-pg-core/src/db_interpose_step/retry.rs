@@ -70,5 +70,37 @@ pub(super) fn maybe_retry_step(p_stmt: *mut sqlite3_stmt, rc: c_int) -> Option<c
         STEP_RETRY_COUNT.with(|c| c.set(0));
     }
 
+    // The flag is this step's. Left set -- after the retries ran out, or by a
+    // step that noted a lost connection and was not retried -- it made the
+    // next statement to fail on this thread, for any reason, a lost
+    // connection too, retried on the whole delay schedule (upstream 661f865).
+    STEP_PG_CONN_ERROR.with(|c| c.set(0));
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noted() -> bool {
+        STEP_PG_CONN_ERROR.with(|c| c.get()) != 0
+    }
+
+    #[test]
+    fn a_noted_connection_error_does_not_outlive_its_step() {
+        // A step that noted a lost connection and is not retried: no
+        // statement of the shim's here, as when the retries have run out.
+        note_pg_conn_error();
+        assert!(noted());
+        assert_eq!(
+            maybe_retry_step(std::ptr::null_mut(), super::super::SQLITE_ERROR),
+            None
+        );
+        assert!(!noted(), "the next failing step would have been retried");
+
+        // And one that noted it but did not fail.
+        note_pg_conn_error();
+        assert_eq!(maybe_retry_step(std::ptr::null_mut(), 101), None);
+        assert!(!noted());
+    }
 }
