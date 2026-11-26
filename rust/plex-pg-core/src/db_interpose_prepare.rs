@@ -12,6 +12,7 @@ use crate::db_interpose_prepare_utils::{
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt};
 
 mod internal_flow;
+pub(crate) use internal_flow::NO_POOL_CONNECTION_MSG;
 mod pg_route;
 mod pg_stmt_setup;
 mod sqlite_path;

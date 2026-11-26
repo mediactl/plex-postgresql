@@ -30,6 +30,7 @@ pub(crate) fn orig_exec_for_tests(
 const SQLITE_OK: c_int = 0;
 const SQLITE_ERROR: c_int = 1;
 const SQLITE_ABORT: c_int = 4;
+const SQLITE_BUSY: c_int = 5;
 
 const CONNECTION_OK: c_int = 0;
 const PGRES_COMMAND_OK: c_int = 1;
@@ -175,6 +176,35 @@ pub extern "C" fn rust_my_sqlite3_exec(
     rc
 }
 
+/// What `sqlite3_exec` does with a statement it has no PostgreSQL connection
+/// for.
+#[derive(Debug, PartialEq, Eq)]
+enum ExecWithoutConnection {
+    /// The shadow SQLite runs it: the handle is SQLite's own, or the
+    /// statement is the engine's (PRAGMA, sqlite_master, transaction control).
+    Shadow,
+    /// Answered as done: a write to an FTS index, which is never sent and
+    /// which the shadow has no table for.
+    Done,
+    /// Refused with SQLITE_BUSY, which PMS retries.
+    Refuse,
+}
+
+fn exec_without_connection(pg_library: bool, sql: &str) -> ExecWithoutConnection {
+    if !pg_library {
+        return ExecWithoutConnection::Shadow;
+    }
+    if crate::pg_config::is_fts_index_write_str(sql) {
+        return ExecWithoutConnection::Done;
+    }
+    if crate::pg_config::is_sqlite_passthrough_str(sql)
+        || crate::pg_config::should_skip_sql_str(sql)
+    {
+        return ExecWithoutConnection::Shadow;
+    }
+    ExecWithoutConnection::Refuse
+}
+
 fn rust_my_sqlite3_exec_impl(
     db: *mut sqlite3,
     sql: *const c_char,
@@ -216,6 +246,32 @@ fn rust_my_sqlite3_exec_impl(
         return exec_via_postgres(pg_conn, db, sql, callback, arg, errmsg);
     }
 
+    // A library handle the shim serves from PostgreSQL, and no connection to
+    // run on: the pool is full or the server is away. The statement used to
+    // go on to the shadow SQLite below, which is empty -- a write reported
+    // done and lost, a read with no rows. The prepare path has refused these
+    // since 2026-10-16 (refuse_without_pool_connection); sqlite3_exec did not
+    // (upstream 5573fc1 refuses them too).
+    let sql_str = unsafe { CStr::from_ptr(sql).to_str().unwrap_or("") };
+    match exec_without_connection(crate::pg_client::handle_is_pg_library(db), sql_str) {
+        ExecWithoutConnection::Shadow => {}
+        ExecWithoutConnection::Done => return SQLITE_OK,
+        ExecWithoutConnection::Refuse => {
+            let msg = crate::db_interpose_prepare::NO_POOL_CONNECTION_MSG;
+            log_error(&format!(
+                "EXEC: {} -- refusing with SQLITE_BUSY rather than the shadow: {}",
+                msg,
+                cstr_prefix(sql, 200, "NULL")
+            ));
+            let handle_conn = crate::pg_client::rust_pg_find_handle_connection(db);
+            if !handle_conn.is_null() {
+                unsafe { (&mut *handle_conn).set_last_error(SQLITE_BUSY, msg) };
+            }
+            pg_path::set_errmsg_out(errmsg, msg);
+            return SQLITE_BUSY;
+        }
+    }
+
     // For non-PG databases (e.g. :memory:), icu_load_collation may fail because
     // the ICU extension isn't available in the Docker runtime environment.
     // Rewrite to "SELECT NULL" so SOCI's loadOne gets a valid row instead of crashing.
@@ -255,7 +311,37 @@ fn rust_my_sqlite3_exec_impl(
 #[cfg(test)]
 mod tests {
     use super::support::parse_positive_returning_rowid;
+    use super::{exec_without_connection, ExecWithoutConnection};
     use std::ffi::CString;
+
+    #[test]
+    fn exec_with_no_connection_refuses_what_postgresql_would_have_run() {
+        use ExecWithoutConnection::{Done, Refuse, Shadow};
+        // A library the shim serves: its statements are PostgreSQL's or no
+        // one's.
+        for (sql, want) in [
+            ("UPDATE metadata_items SET title = 'x' WHERE id = 1", Refuse),
+            ("DELETE FROM media_parts WHERE id = 7", Refuse),
+            ("SELECT count(*) FROM metadata_items", Refuse),
+            ("CREATE INDEX i ON metadata_items (title)", Refuse),
+            // The engine's own, which the shadow answers.
+            ("PRAGMA cache_size=2000", Shadow),
+            ("SELECT name FROM sqlite_master", Shadow),
+            ("select icu_load_collation('root', 'icu_root')", Shadow),
+            // Never sent anywhere.
+            ("DELETE FROM fts4_metadata_titles_icu", Done),
+        ] {
+            assert_eq!(exec_without_connection(true, sql), want, "{sql}");
+        }
+        // A handle that is SQLite's own runs everything itself.
+        for sql in [
+            "UPDATE metadata_items SET title = 'x' WHERE id = 1",
+            "PRAGMA cache_size=2000",
+            "DELETE FROM fts4_metadata_titles_icu",
+        ] {
+            assert_eq!(exec_without_connection(false, sql), Shadow, "{sql}");
+        }
+    }
 
     #[test]
     fn parse_positive_returning_rowid_accepts_positive_values() {
