@@ -98,7 +98,20 @@ pub(super) fn destroy_connection_struct(conn: *mut PgConnection) {
     conn_unref(conn);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for a server that does not answer: while `Some`,
+    /// `create_pool_connection` counts the call and fails it.
+    pub(crate) static FAILED_CONNECTS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 pub(super) fn create_pool_connection(db_path: *const c_char) -> *mut c_void {
+    #[cfg(test)]
+    if let Some(n) = FAILED_CONNECTS.with(|c| c.get()) {
+        FAILED_CONNECTS.with(|c| c.set(Some(n + 1)));
+        return std::ptr::null_mut();
+    }
     let cfg = conn_config();
     log_debug_lazy!(
         "create_pool_connection: host='{}' port={} db='{}' user='{}' schema='{}'",

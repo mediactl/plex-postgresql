@@ -53,7 +53,12 @@ pub(crate) fn phase2_reuse_existing(ctx: &AcquireCtx<'_>) -> AcquireDecision {
             return mark_ready_and_cache_slot(i, slot, conn);
         }
 
+        // The reset and the reconnect both failed: the server is not
+        // answering, and every other free slot's connection would wait out
+        // the same two timeouts to learn it.
         slot.mark_error();
+        ctx.connect_failed.set(true);
+        break;
     }
 
     AcquireDecision::Continue

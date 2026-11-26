@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 
@@ -53,6 +54,7 @@ pub(super) fn acquire_on(
 
     remember_library_path(pm, &selected_path);
 
+    let connect_failed = Cell::new(false);
     let ctx = AcquireCtx {
         pm,
         current_thread,
@@ -60,6 +62,7 @@ pub(super) fn acquire_on(
         pool_size: pm.pool_size(),
         db_path,
         exclude_conn,
+        connect_failed: &connect_failed,
     };
 
     // Shrinking is a matter of time, not of demand. On a warm pool every
@@ -94,4 +97,124 @@ pub(super) fn acquire_on(
     }
 
     phase6_retry(&ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::connection_lifecycle::FAILED_CONNECTS;
+    use super::super::SLOT_ERROR;
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn ctx<'a>(pm: &'a PoolManager, failed: &'a Cell<bool>) -> AcquireCtx<'a> {
+        AcquireCtx {
+            pm,
+            current_thread: 0x7001,
+            now: 1_000,
+            pool_size: pm.pool_size(),
+            db_path: std::ptr::null(),
+            exclude_conn: std::ptr::null(),
+            connect_failed: failed,
+        }
+    }
+
+    /// The server does not answer for the length of `f`; what it returns is
+    /// how many connects were made.
+    fn while_the_server_is_down(f: impl FnOnce()) -> usize {
+        FAILED_CONNECTS.with(|c| c.set(Some(0)));
+        f();
+        FAILED_CONNECTS.with(|c| c.replace(None)).unwrap_or(0)
+    }
+
+    #[test]
+    fn one_failed_connect_ends_the_pass_over_the_empty_slots() {
+        // Eight empty slots: the pass used to try each, at a connect timeout
+        // apiece, and then grow the pool to try one more.
+        let pm = PoolManager::new(8, 16);
+        let failed = Cell::new(false);
+        let c = ctx(&pm, &failed);
+
+        let connects = while_the_server_is_down(|| {
+            assert!(matches!(phase3_create_empty(&c), AcquireDecision::Continue));
+            assert!(matches!(
+                phase4_reclaim_error(&c),
+                AcquireDecision::Continue
+            ));
+            assert!(matches!(phase5_autogrow(&c), AcquireDecision::Continue));
+        });
+
+        assert_eq!(connects, 1, "one connect told the pass the server is down");
+        assert!(failed.get());
+        assert_eq!(
+            pm.configured_size.load(Ordering::Relaxed),
+            8,
+            "no slot added"
+        );
+        for slot in pm.slots.iter().take(8) {
+            assert!(slot.conn.load(Ordering::Relaxed).is_null());
+            assert_eq!(
+                slot.owner_thread.load(Ordering::Relaxed),
+                0,
+                "nothing kept claimed"
+            );
+        }
+    }
+
+    #[test]
+    fn one_failed_connect_ends_the_pass_over_the_slots_in_error() {
+        // A pool with no empty slot left to try: three of its slots failed
+        // earlier and are waiting to be connected again.
+        let pm = PoolManager::new(3, 3);
+        for slot in pm.slots.iter() {
+            slot.state.store(SLOT_ERROR, Ordering::Relaxed);
+        }
+        let failed = Cell::new(false);
+        let c = ctx(&pm, &failed);
+
+        let connects = while_the_server_is_down(|| {
+            assert!(matches!(
+                phase4_reclaim_error(&c),
+                AcquireDecision::Continue
+            ));
+        });
+
+        assert_eq!(connects, 1);
+        assert!(failed.get());
+        let still_in_error = pm
+            .slots
+            .iter()
+            .filter(|s| s.state.load(Ordering::Relaxed) == SLOT_ERROR)
+            .count();
+        assert_eq!(still_in_error, 2, "the other two wait for the next pass");
+    }
+
+    #[test]
+    fn a_pass_with_no_failed_connect_still_tries_to_grow() {
+        // The flag is what stops growth, not the failure of growth itself: a
+        // full pool whose every slot is busy grows by one and connects once.
+        let pm = PoolManager::new(2, 4);
+        for (i, slot) in pm.slots.iter().take(2).enumerate() {
+            slot.state
+                .store(super::super::SLOT_READY, Ordering::Relaxed);
+            slot.owner_thread
+                .store(0x9000 + i as u64, Ordering::Relaxed);
+            slot.conn
+                .store(std::ptr::NonNull::dangling().as_ptr(), Ordering::Relaxed);
+        }
+        let failed = Cell::new(false);
+        let c = ctx(&pm, &failed);
+
+        let connects = while_the_server_is_down(|| {
+            assert!(matches!(phase3_create_empty(&c), AcquireDecision::Continue));
+            assert!(!failed.get(), "no empty slot, so no connect was made");
+            assert!(matches!(phase5_autogrow(&c), AcquireDecision::Continue));
+        });
+
+        assert_eq!(connects, 1);
+        assert!(failed.get(), "the failed growth is a failed connect too");
+        // The slots never held a connection this test owns.
+        for slot in pm.slots.iter().take(2) {
+            slot.conn.store(std::ptr::null_mut(), Ordering::Relaxed);
+        }
+    }
 }

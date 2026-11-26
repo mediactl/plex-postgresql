@@ -12,6 +12,10 @@ use super::common::{
 };
 
 pub(crate) fn phase5_autogrow(ctx: &AcquireCtx<'_>) -> AcquireDecision {
+    // A slot more is no help while the server does not answer.
+    if ctx.connect_failed.get() {
+        return AcquireDecision::Continue;
+    }
     let current_size = ctx.pm.configured_size.load(Ordering::Relaxed);
     let runtime_max = ctx.pm.pool_max();
     if current_size >= runtime_max {
@@ -58,6 +62,7 @@ pub(crate) fn phase5_autogrow(ctx: &AcquireCtx<'_>) -> AcquireDecision {
 
     log_error(&format!("Pool: auto-grow slot {} connection failed", idx));
     release_failed_new_connection(slot, new_conn);
+    ctx.connect_failed.set(true);
 
     AcquireDecision::Continue
 }

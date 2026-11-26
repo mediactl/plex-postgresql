@@ -15,6 +15,13 @@ pub(super) struct AcquireCtx<'a> {
     pub(super) pool_size: usize,
     pub(super) db_path: *const c_char,
     pub(super) exclude_conn: *const c_void,
+    /// Set by the first connect that fails in this pass over the pool. The
+    /// server is then not answering, and every further connect in the pass
+    /// would wait out its own timeout (five seconds each) for the same
+    /// answer: the pass makes no more and adds no slot, and goes to its timed
+    /// retry instead (upstream 61e037b: 1,826 connects and a pool grown to 78
+    /// slots for eight prepares during an outage).
+    pub(super) connect_failed: &'a Cell<bool>,
 }
 
 pub(super) enum AcquireDecision {
