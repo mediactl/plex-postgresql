@@ -200,6 +200,11 @@ pub struct PgStmt {
     pub cached_blob_len: Vec<c_int>,
     pub cached_row: c_int,
     pub col_table_names: Vec<*mut c_char>,
+    /// Per result column, whether the statement's text gives it as the alias
+    /// of an aggregate (`count(tags.id) AS tags_total`): 0 not yet asked, 1
+    /// no, 2 yes. Asked once a column, since the answer is a walk over the
+    /// statement's text and every value's accessor wants it.
+    pub col_aggregate_alias: Vec<u8>,
     pub col_tables_resolved: c_int,
 }
 
@@ -255,6 +260,7 @@ impl PgStmt {
             cached_blob_len: Vec::new(),
             cached_row: -1,
             col_table_names: Vec::new(),
+            col_aggregate_alias: Vec::new(),
             col_tables_resolved: 0,
         }
     }

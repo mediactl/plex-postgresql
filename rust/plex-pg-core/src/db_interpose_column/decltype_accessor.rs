@@ -74,7 +74,31 @@ unsafe fn resolve_special_case_decltype(
     if special_case == PG_DECLTYPE_CASE_NULL {
         return Some(ptr::null());
     }
+    // An expression column whose name does not say it is an aggregate may
+    // still be one under an alias: `sum(duration) AS total`.
+    if table_oid == 0 && aliases_an_aggregate(pg_stmt, idx, col_name) {
+        return Some(ptr::null());
+    }
     None
+}
+
+/// Whether result column `idx` is the alias of an aggregate in the
+/// statement's text, remembered on the statement after the first ask.
+unsafe fn aliases_an_aggregate(pg_stmt: &mut PgStmt, idx: c_int, col_name: *const c_char) -> bool {
+    if idx < 0 || pg_stmt.pg_sql.is_null() || col_name.is_null() {
+        return false;
+    }
+    let i = idx as usize;
+    if pg_stmt.col_aggregate_alias.len() <= i {
+        pg_stmt.col_aggregate_alias.resize(i + 1, 0);
+    }
+    if pg_stmt.col_aggregate_alias[i] == 0 {
+        let sql = crate::db_interpose_helpers::cstr_to_str_or_empty(pg_stmt.pg_sql);
+        let col = crate::db_interpose_helpers::cstr_to_str_or_empty(col_name);
+        let yes = crate::pg_statement::alias_is_aggregate(sql, col);
+        pg_stmt.col_aggregate_alias[i] = if yes { 2 } else { 1 };
+    }
+    pg_stmt.col_aggregate_alias[i] == 2
 }
 
 /// Map a PostgreSQL OID to a SQLite decltype string.
@@ -127,4 +151,35 @@ pub(super) fn column_decltype_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *co
     }
 
     unsafe { oid_decltype(oid) }
+}
+
+#[cfg(test)]
+mod aggregate_alias_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn a_column_s_answer_is_read_from_the_statement_once() {
+        let mut stmt = PgStmt::new();
+        let sql = CString::new("select a, sum(b) as total from t").unwrap();
+        let a = CString::new("a").unwrap();
+        let total = CString::new("total").unwrap();
+        stmt.pg_sql = sql.as_ptr() as *mut c_char;
+        unsafe {
+            assert!(aliases_an_aggregate(&mut stmt, 1, total.as_ptr()));
+            assert!(!aliases_an_aggregate(&mut stmt, 0, a.as_ptr()));
+            assert!(!aliases_an_aggregate(&mut stmt, -1, a.as_ptr()));
+        }
+        assert_eq!(stmt.col_aggregate_alias, vec![1, 2]);
+
+        // Remembered: the text is not walked again, whatever it now says.
+        let other = CString::new("select a, b as total from t").unwrap();
+        stmt.pg_sql = other.as_ptr() as *mut c_char;
+        unsafe {
+            assert!(aliases_an_aggregate(&mut stmt, 1, total.as_ptr()));
+        }
+
+        // The statement does not own this text.
+        stmt.pg_sql = ptr::null_mut();
+    }
 }
