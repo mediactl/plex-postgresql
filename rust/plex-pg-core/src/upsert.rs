@@ -80,9 +80,12 @@ fn transform_insert(insert: &mut Insert) {
             )))]);
         }
     } else if is_ignore {
-        // INSERT OR IGNORE → ON CONFLICT DO NOTHING
+        // INSERT OR IGNORE → ON CONFLICT DO NOTHING, with no target: SQLite
+        // passes over a row that breaks any uniqueness of the table, and a
+        // target would ignore that one key and raise 23505 for the others
+        // (upstream 301f606).
         insert.on = Some(OnInsert::OnConflict(OnConflict {
-            conflict_target,
+            conflict_target: None,
             action: OnConflictAction::DoNothing,
         }));
         insert.or = None;
@@ -417,6 +420,29 @@ mod tests {
         );
         assert!(low.contains("name = excluded.name"));
         assert!(low.contains("v = excluded.v"));
+    }
+
+    #[test]
+    fn insert_or_ignore_names_no_conflict_target() {
+        // SQLite's OR IGNORE passes over a row that breaks any uniqueness the
+        // table has. A target ignores a conflict on that key alone and raises
+        // 23505 for every other: tags has (id) as its target here and other
+        // unique indexes besides.
+        for (stmt, target) in [
+            ("INSERT OR IGNORE INTO tags (id, tag) VALUES (?, ?)", "(id)"),
+            (
+                "INSERT OR IGNORE INTO preferences (name, value) VALUES (?, ?)",
+                "(name)",
+            ),
+            (
+                "INSERT OR IGNORE INTO metadata_item_settings (account_id, guid) VALUES (?, ?)",
+                "(account_id, guid)",
+            ),
+        ] {
+            let low = sql(stmt).to_lowercase();
+            assert!(low.contains("on conflict do nothing"), "{low}");
+            assert!(!low.contains("on conflict("), "{target}: {low}");
+        }
     }
 
     #[test]
