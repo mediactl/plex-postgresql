@@ -94,17 +94,20 @@ pub(super) fn exec_tuples(pg_conn: *mut PGconn, sql: &str) -> bool {
     ok
 }
 
-/// The statement timeout a library connection's session starts with. A
-/// pooled library connection is reset to the library's five minutes before
-/// each read (`prepared_send.rs`).
-pub(super) const SESSION_STATEMENT_TIMEOUT_SQL: &str = "SET statement_timeout = '60s'";
+/// The statement timeout a library connection's session starts with and
+/// keeps: the library's five minutes. It was sixty seconds here, with every
+/// read setting five minutes first, so a connection ran under sixty seconds
+/// only until its first read and paid a round trip per read for it.
+pub(super) const SESSION_STATEMENT_TIMEOUT_SQL: &str =
+    crate::db_interpose_conn_utils::STATEMENT_TIMEOUT_SQL;
 
 /// The statement timeout a connection's session starts with: none for a Live
 /// TV guide's own connection (or a load's), [`SESSION_STATEMENT_TIMEOUT_SQL`]
 /// for every other.
 ///
-/// A guide's reads skip the per-read reset since `.51`, so what is set here
-/// is what every statement on a guide's connection runs under. Until `.56`
+/// No read sets a timeout of its own (a guide's since `.51`, the library's
+/// since the per-read reset went), so what is set here is what every
+/// statement on the connection runs under. Until `.56`
 /// this set sixty seconds on a guide's connection too, and `.51` had read
 /// `.46`'s per-read "no timeout" as set at connect: PMS's guide refresh
 /// streams the whole guide it holds through one SELECT for about six minutes

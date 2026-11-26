@@ -5,7 +5,7 @@ const DATABASES: &str =
     "/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases";
 
 #[test]
-fn a_guide_session_starts_with_no_statement_timeout_and_a_library_one_with_sixty_seconds() {
+fn a_guide_session_starts_with_no_statement_timeout_and_a_library_one_with_five_minutes() {
     // A guide's reads never reset the timeout (.51), so its session's own
     // timeout is the one PMS's whole-guide read runs under: talos's ran about
     // six minutes and was cancelled at sixty seconds under .53.
@@ -17,9 +17,11 @@ fn a_guide_session_starts_with_no_statement_timeout_and_a_library_one_with_sixty
         session_statement_timeout_sql(false),
         SESSION_STATEMENT_TIMEOUT_SQL
     );
+    // The session's own timeout is the only one a library connection is
+    // given: no read sets it again.
     assert_eq!(
         SESSION_STATEMENT_TIMEOUT_SQL,
-        "SET statement_timeout = '60s'"
+        "SET statement_timeout = '5min'"
     );
 }
 

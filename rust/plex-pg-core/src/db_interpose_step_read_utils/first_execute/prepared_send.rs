@@ -99,20 +99,12 @@ pub(super) unsafe fn send_query_for_read(
     let scope = CString::new("STEP READ").unwrap();
     crate::db_interpose_conn_utils::rust_step_conn_cancel_and_drain(exec_conn, scope.as_ptr());
 
-    // The library's five-minute timeout before each read, since a pooled
-    // connection serves many handles. A guide's or a load's own connection
-    // was set to no timeout at its connect (conn_utils) and serves nothing
-    // else, so its reads keep the round trip: a guide load is some 40,000
-    // reads, each of which paid it (the rig, 2026-11-04).
+    // No SET statement_timeout here: the session has had its timeout since
+    // its connect, reset or reconnect (pg_client::session, five minutes for
+    // the library and none for a guide), and nothing changes it afterwards.
+    // Every library read used to send one first, a round trip of its own
+    // (upstream 3b89b23 dropped theirs).
     let ec_ref = &*exec_conn;
-    if crate::db_interpose_conn_utils::read_resets_timeout(ec_ref.db_path.as_ptr()) {
-        let timeout =
-            CString::new(crate::db_interpose_conn_utils::statement_timeout_sql(false)).unwrap();
-        let to_res = crate::libpq_helpers::rust_pq_exec(ec_ref.conn, timeout.as_ptr());
-        if !to_res.is_null() {
-            crate::libpq_helpers::rust_pq_clear(to_res);
-        }
-    }
 
     if !s.pg_sql.is_null() {
         pg_exception_note_query(s.pg_sql);
