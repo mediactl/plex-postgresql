@@ -397,6 +397,13 @@ pub(super) fn prepare_v2_internal_impl(
 
     let sql_str = unsafe { CStr::from_ptr(z_sql) }.to_str().unwrap_or("");
 
+    if crate::pg_config::is_fts_index_write_str(sql_str) {
+        log_info_lazy!(
+            "PREPARE: a write to an FTS index is answered as done and not sent (the index is a view): {}",
+            cstr_prefix(z_sql, 160, "NULL")
+        );
+    }
+
     // SQLite passthrough (fts3_tokenizer, icu_load_collation, sqlite_master, etc.)
     // must use real SQLite prepare. They configure SQLite's engine or query metadata.
     let is_passthrough = crate::pg_config::is_sqlite_passthrough_str(sql_str);

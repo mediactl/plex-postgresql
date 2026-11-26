@@ -117,6 +117,86 @@ pub(crate) fn is_maintenance_noop_str(sql: &str) -> bool {
     false
 }
 
+/// Whether the statement writes to one of Plex's four FTS index tables by
+/// name: INSERT, REPLACE, UPDATE or DELETE on `fts4_metadata_titles`,
+/// `fts4_tag_titles` or their `_icu` twins.
+///
+/// In PostgreSQL those names are views over `metadata_items` and `tags`
+/// (schema/migrations/2026-10-16-fts-collations-indexes.sql), plain
+/// projections of one table, which PostgreSQL lets a statement write through:
+/// `DELETE FROM fts4_metadata_titles_icu`, the first statement of an index
+/// rebuild in SQLite, would delete the library's items. An index that is a view
+/// has nothing to maintain, so these are answered as done and never sent
+/// (upstream 381f9c5, which saw Plex 1.43.4 rebuild its indexes at a start).
+/// A read of the views, and a write that only mentions them, is not one.
+pub(crate) fn is_fts_index_write_str(sql: &str) -> bool {
+    let trimmed = strip_leading_ws_and_sql_comments(sql);
+    let lower = trimmed.to_ascii_lowercase();
+    let mut words = lower.split_ascii_whitespace();
+    // SQLite's conflict clause: INSERT OR REPLACE INTO, UPDATE OR IGNORE.
+    let target = match words.next() {
+        Some("delete") => match words.next() {
+            Some("from") => words.next(),
+            _ => None,
+        },
+        Some("replace") => match words.next() {
+            Some("into") => words.next(),
+            _ => None,
+        },
+        Some("insert") => match words.next() {
+            Some("into") => words.next(),
+            Some("or") => {
+                words.next();
+                match words.next() {
+                    Some("into") => words.next(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        Some("update") => match words.next() {
+            Some("or") => {
+                words.next();
+                words.next()
+            }
+            other => other,
+        },
+        _ => None,
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    // The name ends where a column list or anything else begins:
+    // `fts4_tag_titles(docid, tag)`.
+    let end = target
+        .find(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '"' | '`' | '[' | ']'))
+        })
+        .unwrap_or(target.len());
+    let name = target[..end]
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .trim_matches(['"', '`', '[', ']']);
+    matches!(
+        name,
+        "fts4_metadata_titles"
+            | "fts4_metadata_titles_icu"
+            | "fts4_tag_titles"
+            | "fts4_tag_titles_icu"
+    )
+}
+
+/// Whether a statement routed to PostgreSQL is prepared in the shadow SQLite
+/// as a stand-in (`SELECT 1 WHERE ...` carrying its parameters) instead of as
+/// itself. Everything PostgreSQL runs is; a skipped statement is prepared as
+/// itself, which the shadow can do for PRAGMA, VACUUM and transaction control.
+/// It cannot for a write to an FTS index: the shadow has no such table
+/// (schema/sqlite_virtual_tables.sql), so that one takes the stand-in too.
+pub(crate) fn prepares_as_stand_in_str(sql: &str) -> bool {
+    !should_skip_sql_str(sql) || is_fts_index_write_str(sql)
+}
+
 /// Returns true if the SQL statement should be skipped (treated as a no-op).
 /// Step returns SQLITE_DONE without executing anything.
 /// NOTE: SQLite engine config (fts3_tokenizer, icu_load_collation, load_extension)
@@ -128,6 +208,10 @@ pub(crate) fn should_skip_sql_str(sql: &str) -> bool {
     }
 
     let lower = trimmed.to_lowercase();
+
+    if is_fts_index_write_str(sql) {
+        return true;
+    }
 
     // A) PREFIX patterns (case-insensitive, after stripping leading whitespace)
     const PREFIX_PATTERNS: &[&str] = &[
@@ -610,6 +694,55 @@ mod tests {
     }
 
     // ── should_skip_sql ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_write_to_an_fts_index_is_skipped_and_never_reaches_the_view() {
+        for sql in [
+            "DELETE FROM fts4_metadata_titles_icu",
+            "delete from fts4_metadata_titles_icu;",
+            "INSERT INTO fts4_metadata_titles_icu (rowid, title, title_sort, original_title) SELECT id, title, title_sort, original_title FROM metadata_items",
+            "INSERT INTO fts4_tag_titles(docid, tag) VALUES(?, ?)",
+            "/* rebuild */ INSERT OR REPLACE INTO main.\"fts4_tag_titles_icu\" (docid, tag) VALUES (?, ?)",
+            "UPDATE fts4_metadata_titles SET title = ? WHERE rowid = ?",
+            "UPDATE OR IGNORE `fts4_tag_titles` SET tag = ? WHERE docid = ?",
+            "REPLACE INTO fts4_tag_titles (docid, tag) VALUES (?, ?)",
+            "  \n INSERT INTO [fts4_metadata_titles](fts4_metadata_titles) VALUES('rebuild')",
+        ] {
+            assert!(is_fts_index_write_str(sql), "{sql}");
+            assert!(should_skip_sql_str(sql), "{sql}");
+            // The shadow has no such table: it prepares a stand-in.
+            assert!(prepares_as_stand_in_str(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT rowid FROM fts4_metadata_titles_icu WHERE title MATCH 'test'",
+            "DELETE FROM metadata_items WHERE id IN (SELECT rowid FROM fts4_metadata_titles)",
+            "INSERT INTO metadata_items (title) VALUES ('fts4_metadata_titles')",
+            "UPDATE metadata_items SET title = 'delete from fts4_tag_titles' WHERE id = ?",
+            "DELETE FROM fts4_metadata_titles_archive",
+            "DELETE FROM fts4_metadata_titles_segments",
+            "INSERT INTO tags (tag) VALUES (?)",
+            "DELETE",
+            "INSERT OR",
+            "",
+        ] {
+            assert!(!is_fts_index_write_str(sql), "{sql}");
+            assert!(!should_skip_sql_str(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_skipped_statement_the_shadow_can_prepare_is_prepared_as_itself() {
+        for sql in ["PRAGMA cache_size=2000", "VACUUM", "BEGIN", "COMMIT"] {
+            assert!(should_skip_sql_str(sql), "{sql}");
+            assert!(!prepares_as_stand_in_str(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT id FROM metadata_items",
+            "DELETE FROM metadata_items WHERE id = ?",
+        ] {
+            assert!(prepares_as_stand_in_str(sql), "{sql}");
+        }
+    }
 
     #[test]
     fn skip_null_returns_false() {

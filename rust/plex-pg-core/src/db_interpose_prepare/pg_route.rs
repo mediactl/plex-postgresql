@@ -65,7 +65,9 @@ pub(super) unsafe fn should_use_dummy_shadow(
     is_write: bool,
 ) -> bool {
     should_route_via_pg(pg_conn, is_read, is_write)
-        && crate::pg_config::pg_config_should_skip_sql(z_sql) == 0
+        && crate::pg_config::prepares_as_stand_in_str(
+            crate::db_interpose_helpers::cstr_to_str_or_empty(z_sql),
+        )
 }
 
 unsafe fn translated_sql_for_pg_stmt(
