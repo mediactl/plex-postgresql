@@ -85,15 +85,19 @@ unsafe fn clear_streaming_state(stmt_ptr: *mut PgStmt, stmt: &mut PgStmt, op_nam
             if drain.is_null() {
                 break;
             }
+            // Read to the end, however long: the connection is called idle
+            // below, and a result left on it (the rows the server sent before
+            // the cancel reached it, or the cancel's own error) fails the next
+            // statement the connection is given. This stopped at 1,000
+            // (upstream abfa9d9).
             drain_count += 1;
             crate::libpq_helpers::rust_pq_clear(drain);
-            if drain_count > 1000 {
+            if drain_count == 1000 {
                 log_info_lazy!(
-                    "{}: drain after cancel exceeded 1000 on {:p}",
+                    "{}: drain after cancel passed 1000 results on {:p}, reading on",
                     op_name,
                     stmt.streaming_conn()
                 );
-                break;
             }
         }
         if drain_count > 0 {
