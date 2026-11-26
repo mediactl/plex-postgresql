@@ -767,6 +767,37 @@ fn column_text_reformat_aggregate_int8() {
 }
 
 #[test]
+fn column_text_reformat_aggregate_max_of_an_epoch_stays_digits() {
+    // SQLite answers max(viewed_at) as the integer's digits, and PMS parses the
+    // text as a number. The statement names another *_at column, which used to
+    // turn the answer into "2026-..." -- read by PMS as the number 2026.
+    let sql = c(
+        "SELECT grandparents.id, metadata_item_views.originally_available_at, max(viewed_at) \
+         FROM metadata_item_views GROUP BY 1, 2",
+    );
+    for name in ["max", "min", "MAX"] {
+        let col = c(name);
+        let src = c("1785372260");
+        let mut out = [0 as c_char; 32];
+
+        let rc = rust_column_text_reformat_aggregate(
+            col.as_ptr(),
+            20,
+            sql.as_ptr(),
+            src.as_ptr(),
+            out.as_mut_ptr(),
+            out.len(),
+        );
+
+        assert_eq!(rc, 1, "{name}");
+        let out_s = unsafe { CStr::from_ptr(out.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(out_s, "1785372260", "{name}");
+    }
+}
+
+#[test]
 fn column_text_reformat_aggregate_alias_expression_int8() {
     let col = c("max(year)");
     let sql = c("select max(year) from t");
