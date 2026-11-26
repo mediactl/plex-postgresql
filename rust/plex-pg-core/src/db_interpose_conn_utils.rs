@@ -52,19 +52,6 @@ pub(crate) fn statement_timeout_sql(guide: bool) -> &'static str {
     }
 }
 
-/// Whether `db_path` names a Live TV guide, whose connection runs with no
-/// statement timeout.
-///
-/// # Safety
-/// `db_path` is NUL-terminated or null, as a [`PgConnection`]'s `db_path` is.
-pub(crate) unsafe fn is_guide_path(db_path: *const c_char) -> bool {
-    !db_path.is_null()
-        && crate::db_interpose_helpers::epg_schema_for_path(
-            crate::db_interpose_helpers::cstr_to_str_or_empty(db_path),
-        )
-        .is_some()
-}
-
 #[repr(C)]
 pub struct PgConnConfig {
     pub host: [c_char; 256],
@@ -340,30 +327,5 @@ mod tests {
             statement_timeout_sql(false),
             "SET statement_timeout = '5min'"
         );
-    }
-
-    #[test]
-    fn a_guide_path_is_told_from_the_librarys() {
-        let guide = std::ffi::CString::new(
-            "/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud-0ab001b3-182f-4835-897c-43a9ed6797c5.db",
-        )
-        .unwrap();
-        let library = std::ffi::CString::new(
-            "/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
-        )
-        .unwrap();
-        let load = std::ffi::CString::new(
-            "/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud-0ab001b3-182f-4835-897c-43a9ed6797c5-loading.db",
-        )
-        .unwrap();
-        unsafe {
-            assert!(is_guide_path(guide.as_ptr()));
-            assert!(
-                is_guide_path(load.as_ptr()),
-                "a load runs with no timeout either"
-            );
-            assert!(!is_guide_path(library.as_ptr()));
-            assert!(!is_guide_path(std::ptr::null()));
-        }
     }
 }
