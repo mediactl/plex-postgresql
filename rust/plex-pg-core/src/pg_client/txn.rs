@@ -388,6 +388,29 @@ pub(crate) fn forget_db(db: usize) {
     }
 }
 
+/// What a COMMIT is answered with when a statement of its transaction failed.
+const COMMIT_OF_ABORTED: &str =
+    "cannot commit: a statement in this transaction failed and PostgreSQL rolled it back";
+
+/// Whether `stmt` is the COMMIT of a transaction PostgreSQL has aborted
+/// (`status` is `PQtransactionStatus`). SQLite keeps a transaction open past a
+/// failed statement and commits the rest; PostgreSQL commits none of it, and
+/// says so only in the command tag (upstream 5573fc1).
+fn commit_of_an_aborted_transaction(stmt: &str, status: c_int) -> bool {
+    stmt == "COMMIT" && status == super::session::PQTRANS_INERROR
+}
+
+/// Drops what is tracked for `conn` unless PostgreSQL still has its
+/// transaction open (in progress, or aborted and waiting for a ROLLBACK).
+fn forget_unless_open(conn: *mut PgConnection, pg: *mut crate::libpq_helpers::PGconn) {
+    let status = crate::libpq_helpers::rust_pq_transaction_status(pg);
+    if status != super::session::PQTRANS_INTRANS && status != super::session::PQTRANS_INERROR {
+        let mut reg = mutex_lock(&TXN);
+        reg.by_conn.remove(&(conn as usize));
+        reg.pins.retain(|_, pc| *pc != conn as usize);
+    }
+}
+
 /// Run a transaction-control statement for handle `db` on `conn`.
 ///
 /// Returns Ok(()) when it is done (or was a no-op), Err(message) when
@@ -421,6 +444,20 @@ pub(crate) fn run(conn: *mut PgConnection, db: *const sqlite3, cmd: &TxnCmd) -> 
             Ok(s) => s,
             Err(_) => continue,
         };
+        if commit_of_an_aborted_transaction(
+            stmt,
+            crate::libpq_helpers::rust_pq_transaction_status(c.conn),
+        ) {
+            // PostgreSQL answers this COMMIT with the tag ROLLBACK and a
+            // status of success, so PMS was told its writes were kept when
+            // none were. It is rolled back in so many words and refused.
+            rust_pq_clear(rust_pq_exec(c.conn, c"ROLLBACK".as_ptr()));
+            unsafe { guard.unlock() };
+            log_error(&format!("TXN: {stmt} refused: {COMMIT_OF_ABORTED}"));
+            c.set_last_error(SQLITE_ERROR, COMMIT_OF_ABORTED);
+            forget_unless_open(conn, c.conn);
+            return Err(COMMIT_OF_ABORTED.to_string());
+        }
         let res = rust_pq_exec(c.conn, stmt_c.as_ptr());
         let ok = !res.is_null() && rust_pq_result_status(res) == PGRES_COMMAND_OK;
         if !ok {
@@ -443,14 +480,7 @@ pub(crate) fn run(conn: *mut PgConnection, db: *const sqlite3, cmd: &TxnCmd) -> 
             c.set_last_error(SQLITE_ERROR, &msg);
             // What PostgreSQL thinks is what counts from here: a failed
             // BEGIN left nothing open, a failed COMMIT rolled it back.
-            let mut reg = mutex_lock(&TXN);
-            let txn_open = crate::libpq_helpers::rust_pq_transaction_status(c.conn);
-            if txn_open != super::session::PQTRANS_INTRANS
-                && txn_open != super::session::PQTRANS_INERROR
-            {
-                reg.by_conn.remove(&(conn as usize));
-                reg.pins.retain(|_, pc| *pc != conn as usize);
-            }
+            forget_unless_open(conn, c.conn);
             return Err(msg);
         }
         rust_pq_clear(res);
@@ -482,6 +512,33 @@ mod tests {
 
     fn s(frames: Vec<Frame>) -> TxnState {
         TxnState { frames, db: 1 }
+    }
+
+    #[test]
+    fn only_the_commit_of_an_aborted_transaction_is_refused() {
+        use super::super::session::{PQTRANS_IDLE, PQTRANS_INERROR, PQTRANS_INTRANS};
+        assert!(commit_of_an_aborted_transaction("COMMIT", PQTRANS_INERROR));
+        // A transaction in good standing commits; with none open there is
+        // nothing to lose, and PostgreSQL's own answer stands.
+        assert!(!commit_of_an_aborted_transaction("COMMIT", PQTRANS_INTRANS));
+        assert!(!commit_of_an_aborted_transaction("COMMIT", PQTRANS_IDLE));
+        // Everything else PostgreSQL refuses by itself in an aborted
+        // transaction, or is the way out of one.
+        for stmt in [
+            "ROLLBACK",
+            "ROLLBACK TO SAVEPOINT sp_1",
+            "RELEASE SAVEPOINT sp_1",
+            "SAVEPOINT sp_1",
+            "BEGIN",
+        ] {
+            assert!(
+                !commit_of_an_aborted_transaction(stmt, PQTRANS_INERROR),
+                "{stmt}"
+            );
+        }
+        // What the plan sends for a COMMIT is that word and no other.
+        let open = s(vec![Frame::Outer { explicit: true }]);
+        assert_eq!(plan(&open, &TxnCmd::Commit).0, vec!["COMMIT".to_string()]);
     }
 
     #[test]
