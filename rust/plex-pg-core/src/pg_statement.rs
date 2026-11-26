@@ -54,8 +54,7 @@ mod value_pool;
 pub use c_abi::*;
 pub use metadata_api::*;
 pub(crate) use metadata_helpers::{
-    convert_metadata_settings_upsert, extract_metadata_id, oid_to_sqlite_decltype,
-    oid_to_sqlite_type,
+    extract_metadata_id, oid_to_sqlite_decltype, oid_to_sqlite_type,
 };
 use registry::StmtRegistry;
 pub use registry_api::*;

@@ -43,13 +43,11 @@ pub extern "C" fn rust_step_cached_write_build_exec_sql(
             return std::ptr::null_mut();
         }
 
-        let owned = crate::pg_statement::rust_convert_metadata_settings_upsert(translated_sql);
-        if !owned.is_null() {
-            if !exec_sql_out.is_null() {
-                *exec_sql_out = owned;
-            }
-            return owned;
-        }
+        // A plain INSERT into metadata_item_settings is sent as it is. It
+        // used to gain ON CONFLICT (account_id, guid) DO UPDATE here, over a
+        // UNIQUE constraint Plex's own schema does not have: a second row for
+        // a key was folded into the first, with view_count forced to at least
+        // one. SQLite stores the row PMS inserts (upstream 301f606).
 
         let orig_bytes = cstr_bytes(orig_sql);
         let translated_bytes = cstr_bytes(translated_sql);

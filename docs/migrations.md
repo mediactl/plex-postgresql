@@ -107,3 +107,34 @@ SELECT tgname FROM pg_trigger WHERE tgrelid = 'plex.metadata_items'::regclass AN
 ```
 
 Applied as a superuser, a migration hands what it creates to the `plex` role at its end (the 2026-10-16 file does); check with `SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='plex' AND pg_get_userbyid(c.relowner)<>'plex';` after applying.
+
+### 2026-11-26-stock-uniqueness.sql
+
+Two UNIQUE constraints that Plex's own schema does not have go:
+`metadata_item_settings (account_id, guid)` and `statistics_bandwidth
+(account_id, device_id, timespan, at, lan)`. `statistics_bandwidth` gains the
+two indexes Plex declares (`index_statistics_bandwidth_on_at`,
+`index_statistics_bandwidth_on_account_id_and_timespan_and_at`); the
+constraint's index was the only one it had beside the primary key.
+
+**Order matters.** Apply it only once every Plex on the database runs a shim
+that carries this file. An older shim sends `ON CONFLICT (account_id, guid)`
+with every INSERT into `metadata_item_settings`, which PostgreSQL refuses
+once the constraint is gone, so no watch state would be written. The new shim
+on the old schema is safe: the constraint is then only met when Plex inserts
+a key twice, and that insert is refused.
+
+Verification, after applying:
+
+```sql
+-- neither constraint is left
+SELECT conname FROM pg_constraint
+ WHERE conrelid IN ('plex.metadata_item_settings'::regclass, 'plex.statistics_bandwidth'::regclass)
+   AND contype = 'u';
+-- the lookups are still indexed
+SELECT indexname FROM pg_indexes WHERE schemaname = 'plex'
+   AND tablename IN ('metadata_item_settings', 'statistics_bandwidth') ORDER BY 1;
+-- and, later: has Plex ever stored a key twice?
+SELECT account_id, guid, count(*) FROM plex.metadata_item_settings
+ GROUP BY 1, 2 HAVING count(*) > 1;
+```

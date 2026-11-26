@@ -134,11 +134,15 @@ fn get_conflict_columns(table_name: &str) -> Option<Vec<&'static str>> {
         | "spellfix_metadata_titles"
         | "section_locations"
         | "hub_templates"
+        // Plex's schema has no UNIQUE on these two beyond the id. The
+        // PostgreSQL schema had one each -- (account_id, device_id, timespan,
+        // at, lan) and (account_id, guid) -- and a REPLACE was aimed at it;
+        // both went with schema/migrations/2026-11-26-stock-uniqueness.sql.
+        | "statistics_bandwidth"
+        | "metadata_item_settings"
         | "blobs" => Some(vec!["id"]),
 
         // Tables with UNIQUE constraints (not PK)
-        "statistics_bandwidth" => Some(vec!["account_id", "device_id", "timespan", "at", "lan"]),
-        "metadata_item_settings" => Some(vec!["account_id", "guid"]),
         "locatables" => Some(vec!["location_id", "locatable_id", "locatable_type"]),
         "location_places" => Some(vec!["location_id", "guid"]),
         "media_stream_settings" => Some(vec!["media_stream_id", "account_id"]),
@@ -282,44 +286,46 @@ mod tests {
     }
 
     #[test]
-    fn subset_core__upsert_statistics_bandwidth_conflict_and_set_exclusions() {
+    fn replace_into_statistics_bandwidth_is_by_id_alone() {
+        // Plex's table has no uniqueness but its id, so that is all a
+        // REPLACE can collide on; the bucket's columns are values like any.
         let out = sql("INSERT OR REPLACE INTO statistics_bandwidth \
              (id, account_id, device_id, timespan, at, lan, bytes) \
              VALUES (1, 2, 3, 4, 5, 1, 1024)");
         let low = out.to_lowercase();
         assert!(
-            low.contains("on conflict (account_id, device_id, timespan, at, lan)")
-                || low.contains("on conflict(account_id, device_id, timespan, at, lan)"),
-            "expected composite conflict target, got: {}",
-            out
+            low.contains("on conflict (id)") || low.contains("on conflict(id)"),
+            "{out}"
         );
-        assert!(low.contains("bytes = excluded.bytes"));
-        assert!(!low.contains("account_id = excluded.account_id"));
-        assert!(!low.contains("device_id = excluded.device_id"));
-        assert!(!low.contains("timespan = excluded.timespan"));
-        assert!(!low.contains("at = excluded.at"));
-        assert!(!low.contains("lan = excluded.lan"));
-        assert!(!low.contains("id = excluded.id"));
+        for col in ["account_id", "device_id", "timespan", "at", "lan", "bytes"] {
+            assert!(
+                low.contains(&format!("{col} = excluded.{col}")),
+                "{col}: {out}"
+            );
+        }
+        assert!(!low.contains(" id = excluded.id"));
         assert!(low.contains("returning id"));
     }
 
     #[test]
-    fn subset_core__upsert_metadata_item_settings_conflict_and_returning() {
+    fn replace_into_metadata_item_settings_is_by_id_alone() {
+        // No (account_id, guid) uniqueness in Plex's schema: a REPLACE that
+        // names another row's key and a new id is a new row, as in SQLite.
         let out = sql("INSERT OR REPLACE INTO metadata_item_settings \
              (id, account_id, guid, rating, view_count) \
              VALUES (1, 1, 'plex://movie/abc', 8.0, 5)");
         let low = out.to_lowercase();
         assert!(
-            low.contains("on conflict (account_id, guid)")
-                || low.contains("on conflict(account_id, guid)"),
-            "expected ON CONFLICT(account_id, guid), got: {}",
-            out
+            low.contains("on conflict (id)") || low.contains("on conflict(id)"),
+            "{out}"
         );
-        assert!(low.contains("rating = excluded.rating"));
-        assert!(low.contains("view_count = excluded.view_count"));
-        assert!(!low.contains("account_id = excluded.account_id"));
-        assert!(!low.contains("guid = excluded.guid"));
-        assert!(!low.contains("id = excluded.id"));
+        for col in ["account_id", "guid", "rating", "view_count"] {
+            assert!(
+                low.contains(&format!("{col} = excluded.{col}")),
+                "{col}: {out}"
+            );
+        }
+        assert!(!low.contains(" id = excluded.id"));
         assert!(low.contains("returning id"));
     }
 

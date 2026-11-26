@@ -1,11 +1,10 @@
-use std::ffi::CString;
 use std::os::raw::c_char;
 
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 
 use super::{
-    convert_metadata_settings_upsert, extract_metadata_id, oid_to_sqlite_decltype,
-    oid_to_sqlite_type, DECLTYPE_CASE_DT_INTEGER_8, DECLTYPE_CASE_NONE, DECLTYPE_CASE_NULL,
+    extract_metadata_id, oid_to_sqlite_decltype, oid_to_sqlite_type, DECLTYPE_CASE_DT_INTEGER_8,
+    DECLTYPE_CASE_NONE, DECLTYPE_CASE_NULL,
 };
 
 fn is_aggregate_expression_name(col: &str) -> bool {
@@ -165,19 +164,6 @@ pub fn rust_decltype_special_case(
     }
 
     DECLTYPE_CASE_NONE
-}
-
-pub fn rust_convert_metadata_settings_upsert(sql: *const c_char) -> *mut c_char {
-    let s = unsafe { cstr_to_str_or_empty(sql) };
-    if s.is_empty() {
-        return std::ptr::null_mut();
-    }
-    match convert_metadata_settings_upsert(s) {
-        Some(result) => CString::new(result)
-            .map(|cs| cs.into_raw())
-            .unwrap_or(std::ptr::null_mut()),
-        None => std::ptr::null_mut(),
-    }
 }
 
 pub fn rust_extract_metadata_id(sql: *const c_char) -> i64 {

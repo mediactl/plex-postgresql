@@ -3466,14 +3466,6 @@ ALTER TABLE ONLY plex.metadata_item_setting_markers
 
 
 --
--- Name: metadata_item_settings metadata_item_settings_account_guid_unique; Type: CONSTRAINT; Schema: plex; Owner: -
---
-
-ALTER TABLE ONLY plex.metadata_item_settings
-    ADD CONSTRAINT metadata_item_settings_account_guid_unique UNIQUE (account_id, guid);
-
-
---
 -- Name: metadata_item_settings metadata_item_settings_pkey; Type: CONSTRAINT; Schema: plex; Owner: -
 --
 
@@ -3591,14 +3583,6 @@ ALTER TABLE ONLY plex.section_locations
 
 ALTER TABLE ONLY plex.sqlite_column_types
     ADD CONSTRAINT sqlite_column_types_pkey PRIMARY KEY (table_name, column_name);
-
-
---
--- Name: statistics_bandwidth statistics_bandwidth_account_id_device_id_timespan_at_lan_key; Type: CONSTRAINT; Schema: plex; Owner: -
---
-
-ALTER TABLE ONLY plex.statistics_bandwidth
-    ADD CONSTRAINT statistics_bandwidth_account_id_device_id_timespan_at_lan_key UNIQUE (account_id, device_id, timespan, at, lan);
 
 
 --
@@ -4279,6 +4263,11 @@ CREATE INDEX idx_tags_tag_fts
 -- idx_metadata_items_changed_at (DESC serves both directions);
 -- metadata_items(library_section_id, metadata_type, added_at) by
 -- idx_metadata_items_section_type_added.
+-- statistics_bandwidth had a UNIQUE (account_id, device_id, timespan, at, lan)
+-- that Plex's schema does not, and no other index; these two are Plex's own
+-- (schema/migrations/2026-11-26-stock-uniqueness.sql).
+CREATE INDEX index_statistics_bandwidth_on_at ON plex.statistics_bandwidth (at);
+CREATE INDEX index_statistics_bandwidth_on_account_id_and_timespan_and_at ON plex.statistics_bandwidth (account_id, timespan, at);
 CREATE INDEX index_media_items_on_channel_id_and_begins_at ON plex.media_items (channel_id, begins_at);
 CREATE INDEX index_media_items_on_begins_at ON plex.media_items (begins_at);
 CREATE INDEX index_media_items_on_ends_at ON plex.media_items (ends_at);
